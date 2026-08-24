@@ -189,17 +189,8 @@ export default async function handler(req, res) {
       league, date, strategy: 'ESPN FPI favourite in every game',
       fbsOnly: league === 'ncaaf' && q.fbs !== '0',
       fbsRosterSize: fbsIds ? fbsIds.size : null,
-      fbsSample: fbsIds ? [...fbsIds].slice(0, 5) : null,
       fbsError,
-      rawGamesBeforeFilter: (sj.events || []).length,
-      fbsDebug: (sj.events || []).map((ev) => ({
-        name: ev.shortName,
-        teams: (ev.competitions?.[0]?.competitors || []).map((c) => ({
-          id: String(c?.team?.id), name: c?.team?.abbreviation,
-          inFbs: fbsIds ? fbsIds.has(String(c?.team?.id)) : null,
-        })),
-        kept: isFbsMatchup(ev.competitions?.[0], fbsIds),
-      })),
+      gamesBeforeFbsFilter: (sj.events || []).length,
       settings: { bankroll, kellyFraction: frac, maxStakePct: maxStake, flatStake: flat, role },
       gamesOnDate: games.length,
       kalshiEventsOnDate: events.length,
