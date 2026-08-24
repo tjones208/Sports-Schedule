@@ -49,12 +49,14 @@ export default async function handler(req, res) {
 
     // 1. Completed games in the window
     const raw = [];
+    let completedAll = 0;
     await pool(days, 14, async (d) => {
       try {
         const j = await J(`${SITE}/${L.path}/scoreboard?dates=${d}&${extra}`);
         for (const ev of j.events || []) {
           const c = ev.competitions?.[0];
           if (!c?.status?.type?.completed) continue;
+          completedAll++;
           if (fbsOnly && !isFbsMatchup(c, fbsIds)) continue;
           const home = c.competitors?.find((x) => x.homeAway === 'home');
           const away = c.competitors?.find((x) => x.homeAway === 'away');
@@ -141,6 +143,8 @@ export default async function handler(req, res) {
       league, start, end, fbsOnly,
       // Completed games found vs those ESPN still has a projection for. A big
       // gap would mean the sample is not the season, just the part ESPN kept.
+      completedGamesOnScoreboard: completedAll,
+      fbsRosterSize: fbsIds ? fbsIds.size : null,
       gamesFound: raw.length,
       gamesScored: rows.length,
       coverage: Number(((rows.length / raw.length) * 100).toFixed(1)),
