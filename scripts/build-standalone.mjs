@@ -16,13 +16,13 @@ const arg = (name, fallback) => {
     ? process.argv[i + 1] : fallback;
 };
 const FRAGMENT = process.argv.includes('--fragment');
-const dataPath = arg('data', 'data/demo.json');
+const dataPath = arg('data', 'public/data/demo.json');
 const outPath = arg('out', FRAGMENT ? 'dist/sports-schedule.fragment.html' : 'dist/sports-schedule.html');
 
 const [html, css, js, raw] = await Promise.all([
-  readFile(join(ROOT, 'web/index.html'), 'utf8'),
-  readFile(join(ROOT, 'web/styles.css'), 'utf8'),
-  readFile(join(ROOT, 'web/app.js'), 'utf8'),
+  readFile(join(ROOT, 'public/index.html'), 'utf8'),
+  readFile(join(ROOT, 'public/styles.css'), 'utf8'),
+  readFile(join(ROOT, 'public/app.js'), 'utf8'),
   readFile(join(ROOT, dataPath), 'utf8'),
 ]);
 

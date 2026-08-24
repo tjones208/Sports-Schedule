@@ -15,12 +15,12 @@
 import { writeFile, mkdir } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { LEAGUES, LEAGUE_IDS } from './leagues.mjs';
-import { dateRange } from './time.mjs';
-import { normalizeEvent } from './normalize.mjs';
+import { LEAGUES, LEAGUE_IDS } from '../lib/leagues.mjs';
+import { dateRange } from '../lib/time.mjs';
+import { normalizeEvent } from '../lib/normalize.mjs';
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
-const DATA_DIR = join(ROOT, 'data');
+const DATA_DIR = join(ROOT, 'public', 'data');
 const BASE = 'https://site.api.espn.com/apis/site/v2/sports';
 
 function parseArgs(argv) {

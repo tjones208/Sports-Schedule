@@ -5,7 +5,8 @@ import { readFile } from 'node:fs/promises';
 import { join, extname, normalize } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-const ROOT = join(fileURLToPath(new URL('.', import.meta.url)), '..');
+const PROJECT = join(fileURLToPath(new URL('.', import.meta.url)), '..');
+const ROOT = join(PROJECT, 'public');
 const PORT = Number(process.env.PORT) || 8080;
 const TYPES = {
   '.html': 'text/html; charset=utf-8', '.js': 'text/javascript; charset=utf-8',
@@ -16,7 +17,7 @@ const TYPES = {
 createServer(async (req, res) => {
   try {
     let path = decodeURIComponent(new URL(req.url, 'http://x').pathname);
-    if (path === '/') path = '/web/index.html';
+    if (path === '/') path = '/index.html';
     // Keep requests inside the project directory.
     const full = join(ROOT, normalize(path).replace(/^(\.\.[/\\])+/, ''));
     if (!full.startsWith(ROOT)) { res.writeHead(403).end('Forbidden'); return; }

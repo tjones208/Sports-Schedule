@@ -8,6 +8,8 @@ const LEAGUE_LABEL = {
   ncaaf: 'CFB', ncaab: 'CBB',
 };
 const PAGE_SIZE = 250;
+const SAMPLE_NOTICE = `<div><strong>Sample data.</strong> These are illustrative
+  matchups, not the published schedules.</div>`;
 
 const state = {
   games: [],
@@ -44,34 +46,59 @@ async function loadJSON(url) {
   return res.json();
 }
 
-async function loadData() {
-  // A standalone build inlines its data, so there is nothing to fetch.
-  if (window.__SCHEDULE_DATA__) {
-    const d = window.__SCHEDULE_DATA__;
-    return {
-      games: (d.leagues || []).flatMap((l) => l.games || []),
-      isDemo: Boolean(d.demo), warning: d.warning, timezone: d.timezone,
-      generatedAt: d.generatedAt,
-    };
+async function loadJSONSafe(url) {
+  const res = await fetch(url, { cache: 'no-store' });
+  if (!res.ok) {
+    let detail = `${res.status}`;
+    try { const j = await res.json(); if (j.error) detail = j.error; } catch { /* not JSON */ }
+    throw new Error(detail);
   }
-  // Prefer a real pull; fall back to the demo fixture.
-  try {
-    const index = await loadJSON('../data/index.json');
-    const leagues = (index.leagues || []).filter((l) => l.gameCount > 0);
-    if (leagues.length === 0) throw new Error('index has no games');
-    const sets = await Promise.all(
-      leagues.map((l) => loadJSON(`../data/${l.league}.json`).catch(() => null)),
-    );
-    const games = sets.filter(Boolean).flatMap((s) => s.games || []);
-    if (games.length === 0) throw new Error('no games in league files');
-    return { games, isDemo: false, generatedAt: index.generatedAt, timezone: index.timezone };
-  } catch {
-    const demo = await loadJSON('../data/demo.json');
-    return {
-      games: (demo.leagues || []).flatMap((l) => l.games || []),
-      isDemo: true, warning: demo.warning, timezone: demo.timezone,
-    };
+  return res.json();
+}
+
+/**
+ * Pull every league from the schedule API, calling onLeague as each one lands so
+ * the board fills in progressively instead of waiting on the slowest league.
+ */
+async function loadFromAPI(onLeague, onStatus) {
+  const meta = await loadJSONSafe('/api/leagues');
+  const leagues = meta.leagues || [];
+  if (leagues.length === 0) throw new Error('no leagues configured');
+
+  const pending = new Set(leagues.map((l) => l.name));
+  onStatus(pending);
+
+  const settled = await Promise.allSettled(leagues.map(async (l) => {
+    try {
+      const data = await loadJSONSafe(`/api/schedule?league=${encodeURIComponent(l.league)}`);
+      onLeague(data);
+      return data;
+    } finally {
+      pending.delete(l.name);
+      onStatus(pending);
+    }
+  }));
+
+  const ok = settled.filter((r) => r.status === 'fulfilled').map((r) => r.value);
+  if (ok.length === 0) {
+    throw new Error(settled[0]?.reason?.message || 'every league failed to load');
   }
+  return {
+    loaded: ok,
+    failed: leagues
+      .filter((l, i) => settled[i].status === 'rejected')
+      .map((l, i) => l.name),
+    generatedAt: ok[0].generatedAt,
+    timezone: ok[0].timezone,
+  };
+}
+
+async function loadDemo() {
+  const demo = await loadJSONSafe('data/demo.json');
+  return {
+    games: (demo.leagues || []).flatMap((l) => l.games || []),
+    isDemo: true, timezone: demo.timezone,
+  };
 }
 
 /* ---------- helpers ---------- */
@@ -373,35 +400,77 @@ function wire() {
 
 /* ---------- boot ---------- */
 
+function setNotice(html, tone) {
+  const el = document.getElementById('notice');
+  if (!html) { el.classList.add('hidden'); return; }
+  el.classList.remove('hidden');
+  el.dataset.tone = tone || 'warn';
+  el.innerHTML = html;
+}
+
+function sortGames(list) {
+  return list.sort(
+    (a, b) => a.date.localeCompare(b.date) || a.sortKey - b.sortKey
+      || a.home.name.localeCompare(b.home.name),
+  );
+}
+
 (async function init() {
-  try {
-    const data = await loadData();
-    state.games = data.games.sort(
-      (a, b) => a.date.localeCompare(b.date) || a.sortKey - b.sortKey
-        || a.home.name.localeCompare(b.home.name),
-    );
-    state.isDemo = data.isDemo;
+  wire();
 
-    const notice = document.getElementById('notice');
-    if (data.isDemo) {
-      notice.innerHTML = `<div><strong>Sample data.</strong> These are illustrative
-        matchups, not the published schedules. Run <code>npm run fetch</code> to pull
-        the real NFL, NBA, NHL, college football and college basketball seasons.</div>`;
-    } else {
-      notice.classList.add('hidden');
-      document.getElementById('generated').textContent =
-        `Data pulled ${new Date(data.generatedAt).toLocaleString('en-US', { timeZone: 'America/Denver' })} MT`;
-    }
-    if (data.timezone) document.getElementById('tzname').textContent = data.timezone;
+  // A bundled build carries its data inline - nothing to fetch.
+  if (window.__SCHEDULE_DATA__) {
+    const d = window.__SCHEDULE_DATA__;
+    state.games = sortGames((d.leagues || []).flatMap((l) => l.games || []));
+    state.isDemo = Boolean(d.demo);
+    if (state.isDemo) setNotice(SAMPLE_NOTICE);
+    if (d.timezone) document.getElementById('tzname').textContent = d.timezone;
+    renderLeagueTabs(); renderNetworkOptions(); refresh();
+    return;
+  }
 
+  let firstPaint = false;
+  const onLeague = (data) => {
+    state.games = sortGames(state.games.concat(data.games || []));
     renderLeagueTabs();
     renderNetworkOptions();
-    wire();
     refresh();
+    if (!firstPaint) { firstPaint = true; }
+  };
+  const onStatus = (pending) => {
+    if (pending.size === 0) return;
+    setNotice(`<div>Loading live schedules from ESPN &mdash;
+      <strong>${[...pending].join(', ')}</strong>. Full seasons take a few seconds
+      the first time, then they are cached.</div>`, 'info');
+  };
+
+  try {
+    const result = await loadFromAPI(onLeague, onStatus);
+    document.getElementById('tzname').textContent = result.timezone || 'America/Denver';
+    document.getElementById('generated').textContent =
+      `Live from ESPN \u00b7 refreshed ${new Date(result.generatedAt)
+        .toLocaleString('en-US', { timeZone: 'America/Denver' })} MT`;
+    if (result.failed.length) {
+      setNotice(`<div><strong>${result.failed.join(' and ')}</strong> could not be
+        loaded right now. Everything else below is live. Reload to try again.</div>`, 'warn');
+    } else {
+      setNotice('');
+    }
   } catch (err) {
-    document.getElementById('listings').innerHTML = `<div class="empty">
-      <h3>Could not load schedules</h3>
-      <p>${esc(err.message)}. Serve this folder over HTTP (<code>npm start</code>) rather than
-      opening the file directly, so the browser can read the data files.</p></div>`;
+    // Live data unavailable - fall back to the labelled sample set.
+    try {
+      const demo = await loadDemo();
+      state.games = sortGames(demo.games);
+      state.isDemo = true;
+      document.getElementById('tzname').textContent = demo.timezone || 'America/Denver';
+      setNotice(SAMPLE_NOTICE + `<div style="margin-top:4px">Live schedules were
+        unavailable (${esc(err.message)}).</div>`);
+      renderLeagueTabs(); renderNetworkOptions(); refresh();
+    } catch (err2) {
+      document.getElementById('listings').innerHTML = `<div class="empty">
+        <h3>Could not load schedules</h3>
+        <p>${esc(err.message)}</p></div>`;
+      setNotice('');
+    }
   }
 })();

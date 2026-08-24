@@ -126,6 +126,11 @@ body {
 }
 .notice strong { font-weight: 600; }
 .notice.hidden { display: none; }
+.notice[data-tone="info"] {
+  border-left-color: var(--ink-faint);
+  background: var(--card-alt);
+  color: var(--ink-soft);
+}
 
 /* ---------- Summary strip ---------- */
 
