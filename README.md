@@ -99,6 +99,28 @@ node scripts/build-standalone.mjs      # dist/sports-schedule.html, data inlined
 node scripts/build-standalone.mjs --fragment
 ```
 
+## Historical betting lines (optional)
+
+Backtesting needs an entry price, and nothing keeps one: ESPN drops odds from
+completed games, and Kalshi exposes no settled markets at all. The
+[CollegeFootballData](https://collegefootballdata.com) API does retain closing
+lines. Register for a free key and set it as `CFBD_API_KEY`:
+
+```bash
+# locally
+export CFBD_API_KEY=...
+# on Vercel: Project > Settings > Environment Variables, then redeploy
+```
+
+With the key set, `/api/backtest` scores the market alongside ESPN FPI and
+reports what a strategy would actually have returned at market prices, instead
+of against an assumed one. Without it, the backtest still runs - it just falls
+back to the parameterised `pnl` simulation.
+
+Games are joined to the lines by school name, and the response reports the match
+rate plus a sample of unmatched games so a naming mismatch is visible rather
+than silently shrinking the sample.
+
 ## Prediction desk
 
 `/predict.html` is a Kalshi-oriented desk for tracking sports predictions against a
