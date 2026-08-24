@@ -216,6 +216,20 @@ export default async function handler(req, res) {
       }
     }
 
+    // ?minProb / ?maxProb restrict every downstream number to a confidence
+    // window, so a "only trade 60-80%" rule can be measured directly.
+    const minProb = q.minProb != null ? Number(q.minProb) / 100 : null;
+    const maxProb = q.maxProb != null ? Number(q.maxProb) / 100 : null;
+    const beforeFilter = rows.length;
+    if (minProb != null || maxProb != null) {
+      const keep = rows.filter((r) => {
+        const p = Math.max(r.fpiHome, 1 - r.fpiHome);
+        return (minProb == null || p >= minProb) && (maxProb == null || p < maxProb);
+      });
+      rows.length = 0;
+      rows.push(...keep);
+    }
+
     if (!rows.length) { res.status(200).json({ league, start, end, games: 0, note: 'no completed games with a projection' }); return; }
 
     // 3. Score it
@@ -268,6 +282,9 @@ export default async function handler(req, res) {
     res.setHeader('Cache-Control', 'public, s-maxage=86400');
     res.status(200).json({
       league, start, end, year, weeks, fbsOnly,
+      probabilityWindow: (minProb != null || maxProb != null)
+        ? { min: minProb == null ? null : minProb * 100, max: maxProb == null ? null : maxProb * 100,
+            gamesBefore: beforeFilter, gamesAfter: rows.length } : null,
       requests,
       // Completed games found vs those ESPN still has a projection for. A big
       // gap would mean the sample is not the season, just the part ESPN kept.
@@ -364,6 +381,7 @@ export default async function handler(req, res) {
 
         const run = (delta, mode) => {
           let staked = 0, fees = 0, profit = 0, bets = 0, wins = 0, contractsTotal = 0;
+          const pnls = [];
           for (const r of rows) {
             const p = Math.max(r.fpiHome, 1 - r.fpiHome);
             const won = ((r.fpiHome >= 0.5) === r.homeWon);
@@ -385,11 +403,17 @@ export default async function handler(req, res) {
             if (contracts < 1) continue;
             const fee = orderFeeDollars(contracts, ask, 'taker');
             const cost = contracts * (ask / 100) + fee;
+            const pl = won ? contracts - cost : -cost;
             bets++; wins += won ? 1 : 0; staked += cost; fees += fee; contractsTotal += contracts;
-            profit += won ? contracts - cost : -cost;
+            profit += pl; pnls.push(pl);
           }
+          const mean = bets ? profit / bets : 0;
+          const sd = bets > 1 ? Math.sqrt(pnls.reduce((t, x) => t + (x - mean) ** 2, 0) / (bets - 1)) : null;
+          const seTotal = sd == null ? null : sd * Math.sqrt(bets);
           return {
             delta, bets, wins,
+            profitSE: seTotal == null ? null : Number(seTotal.toFixed(2)),
+            tStat: seTotal && seTotal > 0 ? Number((profit / seTotal).toFixed(2)) : null,
             avgPriceCents: bets ? Number(((staked - fees) / (bets * fixedContracts) * 100).toFixed(2)) : null,
             winRate: bets ? Number(((wins / bets) * 100).toFixed(2)) : null,
             staked: Number(staked.toFixed(2)),
