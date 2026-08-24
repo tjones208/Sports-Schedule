@@ -72,6 +72,23 @@ test('fee-aware Kelly stakes less than fee-blind Kelly', () => {
   assert.ok(close(withFees.staked, withFees.full * 0.25));
 });
 
+test('Kelly breakeven agrees exactly with net edge', () => {
+  // The two must cross zero at the same probability, or the table can show a
+  // negative edge next to a positive stake.
+  for (const c of [5, 17, 33, 50, 68, 84, 95]) {
+    const be = breakevenProbability(c);
+    assert.ok(close(kellyNet(be, c, 0.25).breakeven, be, 1e-9),
+      `breakeven mismatch at ${c}c`);
+    assert.ok(close(kellyNet(be, c, 0.25).staked, 0, 1e-9),
+      `stake must be zero at breakeven for ${c}c`);
+    assert.ok(kellyNet(be - 0.005, c, 0.25).staked === 0,
+      `a probability below breakeven must not stake at ${c}c`);
+    assert.ok(kellyNet(be + 0.02, c, 0.25).staked > 0,
+      `a probability above breakeven must stake at ${c}c`);
+    assert.ok(netEdge(be, c) < 1e-9 && netEdge(be, c) > -1e-9);
+  }
+});
+
 test('fee-aware Kelly refuses a position that only looked good before fees', () => {
   const k = kellyNet(0.505, 50, 0.25);
   assert.equal(k.staked, 0, 'half a point of edge at 50c is not tradeable after fees');

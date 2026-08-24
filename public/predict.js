@@ -15,13 +15,34 @@ const DEFAULTS = {
   kellyFraction: 0.25,
   maxStakePct: 0.05,
   minEdgePts: 3,
+  feeRole: 'taker',      // you are usually crossing the spread to hit an ask
+  fpiWeight: 0.35,       // how much the ESPN model counts in the blend
   positions: [],
 };
+
+// Kalshi published fee schedule: 7% of C x P x (1-P), makers pay a quarter.
+const TAKER_RATE = 0.07;
+const MAKER_MULTIPLIER = 0.25;
+
+function feePerContractCents(priceCents, role) {
+  const p = Number(priceCents) / 100;
+  if (!Number.isFinite(p) || p <= 0 || p >= 1) return 0;
+  const rate = role === 'maker' ? TAKER_RATE * MAKER_MULTIPLIER : TAKER_RATE;
+  return rate * p * (1 - p) * 100;
+}
+function orderFeeDollars(contracts, priceCents, role) {
+  const n = Number(contracts), p = Number(priceCents) / 100;
+  if (!Number.isFinite(n) || n <= 0 || !Number.isFinite(p) || p <= 0 || p >= 1) return 0;
+  const rate = role === 'maker' ? TAKER_RATE * MAKER_MULTIPLIER : TAKER_RATE;
+  return Math.ceil(Number((rate * n * p * (1 - p) * 100).toFixed(9))) / 100;
+}
+const effectivePriceCents = (c, role) => Number(c) + feePerContractCents(c, role);
 
 let state = load();
 let games = [];        // ESPN games for the selected league
 let kalshiEvents = []; // open Kalshi events for that league
 let matched = [];      // joined rows
+let fpiCache = new Map(); // ESPN FPI projections by raw event id
 let tab = 'edges';
 
 /* ---------- storage ---------- */
@@ -128,17 +149,44 @@ function marketForTeam(ev, team) {
   }) || null;
 }
 
+/**
+ * Days since each team last played, from the league schedule already loaded.
+ * Short rest is a real effect the market prices in, and a large rest gap is
+ * worth seeing next to a price.
+ */
+function computeRest(list) {
+  const last = new Map();
+  const byDate = list.slice().sort((a, b) => a.date.localeCompare(b.date));
+  const days = (a, b) => Math.round(
+    (Date.parse(`${b}T12:00:00Z`) - Date.parse(`${a}T12:00:00Z`)) / 86400000);
+
+  for (const g of byDate) {
+    for (const side of ['home', 'away']) {
+      const key = g[side].abbrev || g[side].name;
+      const prev = last.get(key);
+      g[`${side}Rest`] = prev ? days(prev, g.date) : null;
+      last.set(key, g.date);
+    }
+  }
+  return list;
+}
+
 /* ---------- edge math (mirrors lib/odds.mjs) ---------- */
 
-function kelly(p, priceCents, fraction) {
+/** Kelly against the fee-inclusive price: you risk (c + fee) to win (100 - c). */
+function kellyNet(p, priceCents, fraction, role) {
   const c = Number(priceCents);
   if (!Number.isFinite(p) || !Number.isFinite(c) || c <= 0 || c >= 100) return null;
-  const price = c / 100;
-  const b = (1 - price) / price;
+  const cost = effectivePriceCents(c, role) / 100;
+  const win = (100 - effectivePriceCents(c, role)) / 100;
+  if (cost <= 0 || cost >= 1 || win <= 0) return null;
+  const b = win / cost;
   const full = (p * b - (1 - p)) / b;
-  return { full: Math.max(0, full), staked: Math.max(0, full * fraction), edge: p - price };
+  return { full: Math.max(0, full), staked: Math.max(0, full * fraction),
+    edge: p - cost, breakeven: cost };
 }
-const evCents = (p, c) => p * (100 - c) - (1 - p) * c;
+const grossEvCents = (p, c) => p * (100 - c) - (1 - p) * c;
+const netEvCents = (p, c, role) => grossEvCents(p, c) - feePerContractCents(c, role);
 
 /** Build the joined view: ESPN fair probability vs Kalshi ask, per side. */
 function buildRows() {
@@ -149,37 +197,47 @@ function buildRows() {
     const game = games.find((g) => eventMatchesGame(ev, g, parsed));
     if (!game || !game.fair) continue;
 
-    for (const [side, team, fairP] of [
-      ['home', game.home, game.fair.home],
-      ['away', game.away, game.fair.away],
+    const fpi = fpiCache.get(String(game.id).replace(/^[a-z]+-/, ''));
+
+    for (const [side, team, fairP, fpiP] of [
+      ['home', game.home, game.fair.home, fpi?.homeWin ?? null],
+      ['away', game.away, game.fair.away, fpi?.awayWin ?? null],
     ]) {
+      // Blend the book with the ESPN model. The book gets most of the weight:
+      // it has real money behind it and updates continuously.
+      const w = fpiP == null ? 0 : state.fpiWeight;
+      const blend = fairP * (1 - w) + (fpiP ?? 0) * w;
+      const disagree = fpiP == null ? null : Math.abs(fairP - fpiP);
       const mkt = marketForTeam(ev, team);
       if (!mkt) continue;
-
       const ask = mkt.yesAsk ?? mkt.last ?? null;
       const quoted = ask != null && ask > 0 && ask < 100;
 
       // Kalshi lists game markets well before it opens an order book on them,
       // so an unquoted market is normal - keep the row and mark it pending.
       if (!quoted) {
-        rows.push({ game, ev, mkt, side, team, fair: fairP, quoted: false,
-          ask: null, edge: null, ev: null, stakeDollars: 0, contracts: 0,
-          source: game.fair.source });
+        rows.push({ game, kEvent: ev, mkt, side, team, fair: fairP, fpi: fpiP, blend,
+          disagree, quoted: false, ask: null, edge: null, netEv: null,
+          stakeDollars: 0, contracts: 0, fee: 0, source: game.fair.source });
         continue;
       }
 
-      const k = kelly(fairP, ask, state.kellyFraction);
+      const k = kellyNet(blend, ask, state.kellyFraction, state.feeRole);
       if (!k) continue;
       const capped = Math.min(k.staked, state.maxStakePct);
       const stakeDollars = capped * state.bankroll;
+      const contracts = Math.floor(stakeDollars / (ask / 100));
       rows.push({
-        game, ev, mkt, side, team, quoted: true,
-        fair: fairP, ask,
-        edge: fairP - ask / 100,
-        ev: evCents(fairP, ask),
+        game, kEvent: ev, mkt, side, team, quoted: true,
+        fair: fairP, fpi: fpiP, blend, disagree, ask,
+        grossEdge: blend - ask / 100,
+        edge: k.edge,                      // net of fees
+        netEv: netEvCents(blend, ask, state.feeRole),
+        grossEv: grossEvCents(blend, ask),
+        breakeven: k.breakeven,
         kellyFull: k.full,
-        stakeDollars,
-        contracts: Math.floor(stakeDollars / (ask / 100)),
+        stakeDollars, contracts,
+        fee: orderFeeDollars(contracts, ask, state.feeRole),
         source: game.fair.source,
       });
     }
@@ -254,13 +312,23 @@ function renderBank() {
 
 /* ---------- rendering: edges ---------- */
 
+/** "6d/3d rest" when either side is on an unusual turnaround. */
+function restNote(g) {
+  const h = g.homeRest, a = g.awayRest;
+  if (h == null && a == null) return '';
+  const odd = (h != null && h <= 4) || (a != null && a <= 4)
+    || (h != null && a != null && Math.abs(h - a) >= 3);
+  if (!odd) return '';
+  return ` &middot; <span class="restchip">rest ${a ?? '?'}d away / ${h ?? '?'}d home</span>`;
+}
+
 function renderEdges() {
   const el = document.getElementById('edges');
   const minEdge = state.minEdgePts / 100;
   const onlyEdges = document.getElementById('onlyEdges').checked;
 
   let rows = matched;
-  if (onlyEdges) rows = rows.filter((r) => r.quoted && r.edge >= minEdge && r.ev > 0);
+  if (onlyEdges) rows = rows.filter((r) => r.quoted && r.edge >= minEdge && r.netEv > 0);
 
   if (!rows.length) {
     el.innerHTML = `<div class="empty">
@@ -276,33 +344,46 @@ function renderEdges() {
 
   el.innerHTML = `<div class="tablewrap"><table class="tbl">
     <thead><tr>
-      <th>Game</th><th>Pick</th><th class="r">Book fair</th><th class="r">Kalshi ask</th>
-      <th class="r">Edge</th><th class="r">EV/contract</th><th class="r">Kelly stake</th><th></th>
+      <th>Game</th><th>Pick</th>
+      <th class="r">Book</th><th class="r">ESPN FPI</th><th class="r">Blend</th>
+      <th class="r">Kalshi ask</th><th class="r">Net edge</th><th class="r">Net EV</th>
+      <th class="r">Stake</th><th></th>
     </tr></thead><tbody>
     ${rows.map((r, i) => {
       const g = r.game;
-      const good = r.quoted && r.edge >= minEdge && r.ev > 0;
+      const good = r.quoted && r.edge >= minEdge && r.netEv > 0;
       return `<tr class="${good ? 'good' : ''}">
         <td>
           <div class="g-teams">${esc(g.away.short || g.away.name)} at ${esc(g.home.short || g.home.name)}</div>
           <div class="g-meta">${esc(g.weekday)} ${esc(g.date)} &middot; ${esc(g.time)} ${esc(g.tz)}
-            ${g.networks?.length ? `&middot; ${esc(g.networks.join(', '))}` : ''}</div>
+            ${g.networks?.length ? `&middot; ${esc(g.networks.join(', '))}` : ''}${restNote(g)}</div>
         </td>
         <td><strong>${esc(r.team.short || r.team.name)}</strong>
-          <div class="g-meta">${r.source === 'spread' ? 'from spread' : 'from moneyline'}</div></td>
+          <div class="g-meta">${r.source === 'spread' ? 'from spread' : 'from moneyline'}</div>
+          ${r.disagree != null && r.disagree >= 0.08
+            ? `<div class="g-meta"><span class="warnchip">models differ ${pts(r.disagree)}</span></div>` : ''}</td>
         <td class="r mono">${pct(r.fair, 1)}</td>
+        <td class="r mono">${r.fpi == null ? '<span class="pending">--</span>' : pct(r.fpi, 1)}</td>
+        <td class="r mono"><strong>${pct(r.blend, 1)}</strong></td>
         <td class="r mono">${r.quoted ? `${r.ask}&cent;` : '<span class="pending">no book</span>'}</td>
-        <td class="r mono ${!r.quoted ? '' : r.edge > 0 ? 'up' : 'down'}">${r.quoted ? pts(r.edge) : '--'}</td>
-        <td class="r mono ${!r.quoted ? '' : r.ev > 0 ? 'up' : 'down'}">${r.quoted ? `${r.ev.toFixed(1)}&cent;` : '--'}</td>
+        <td class="r mono ${!r.quoted ? '' : r.edge > 0 ? 'up' : 'down'}">${
+          r.quoted ? `${pts(r.edge)}<div class="g-meta">${pts(r.grossEdge)} gross</div>` : '--'}</td>
+        <td class="r mono ${!r.quoted ? '' : r.netEv > 0 ? 'up' : 'down'}">${
+          r.quoted ? `${r.netEv.toFixed(1)}&cent;` : '--'}</td>
         <td class="r mono">${r.quoted
-          ? `${money(r.stakeDollars)}<div class="g-meta">${r.contracts} contracts</div>`
+          ? `${money(r.stakeDollars)}<div class="g-meta">${r.contracts} @ ${r.ask}&cent; &middot; ${money(r.fee)} fee</div>`
           : '--'}</td>
         <td class="r"><button class="btn sm" data-log="${i}"${r.quoted ? '' : ' disabled'}>Log</button></td>
       </tr>`;
     }).join('')}
   </tbody></table></div>
-  <p class="fineprint">Book fair is the sportsbook line with the vig removed. Edge is that
-  probability minus the Kalshi ask. Stake is ${pct(state.kellyFraction, 0)} Kelly, capped at
+  <p class="fineprint"><strong>Book</strong> is the sportsbook line with the vig removed.
+  <strong>ESPN FPI</strong> is ESPN's own model, independent of the betting line.
+  <strong>Blend</strong> weights them ${pct(1 - state.fpiWeight, 0)}/${pct(state.fpiWeight, 0)} and is what
+  the edge and stake are computed from. <strong>Net edge</strong> and <strong>Net EV</strong> are
+  after Kalshi's ${state.feeRole} fee, which peaks at 1.75&cent; per contract near 50&cent; -
+  that is why a thin gross edge often nets out to nothing. Stake is
+  ${pct(state.kellyFraction, 0)} Kelly on the fee-inclusive price, capped at
   ${pct(state.maxStakePct, 0)} of bankroll.</p>`;
 
   el.querySelectorAll('[data-log]').forEach((b) => {
@@ -458,9 +539,22 @@ function renderSettings() {
     <label>Max stake per position (% of bankroll)
       <input type="number" id="setMax" min="0.5" max="100" step="0.5" value="${(state.maxStakePct * 100).toFixed(1)}">
       <span class="hint">A hard cap applied after Kelly, so one position cannot dominate the season.</span></label>
+    <label>Fee role
+      <select id="setFeeRole">
+        <option value="taker"${state.feeRole === 'taker' ? ' selected' : ''}>Taker (hitting the ask)</option>
+        <option value="maker"${state.feeRole === 'maker' ? ' selected' : ''}>Maker (resting a bid)</option>
+      </select>
+      <span class="hint">Kalshi charges takers 7% of price x (1 - price), peaking at 1.75c per
+      contract at 50c. Makers pay a quarter of that. Taker is the honest default if you are
+      lifting an offer.</span></label>
+    <label>ESPN FPI weight in the blend
+      <input type="number" id="setFpi" min="0" max="1" step="0.05" value="${state.fpiWeight}">
+      <span class="hint">0 uses the sportsbook line alone. 0.35 lets ESPN's model pull the
+      estimate about a third of the way. The book deserves most of the weight - it has real
+      money behind it and moves continuously.</span></label>
     <label>Minimum edge to flag (points)
       <input type="number" id="setEdge" min="0" max="50" step="0.5" value="${state.minEdgePts}">
-      <span class="hint">Kalshi charges trading fees, so a small nominal edge can still lose money.</span></label>
+      <span class="hint">Applied to the <em>net</em> edge, after fees.</span></label>
     <div class="dlg-wide settings-actions">
       <button class="btn" id="exportBtn" type="button">Export positions (JSON)</button>
       <label class="btn filelabel">Import<input type="file" id="importFile" accept="application/json" hidden></label>
@@ -477,6 +571,11 @@ function renderSettings() {
   bind('setKelly', 'kellyFraction');
   bind('setMax', 'maxStakePct', (v) => Number(v) / 100);
   bind('setEdge', 'minEdgePts');
+  bind('setFpi', 'fpiWeight');
+  document.getElementById('setFeeRole').addEventListener('change', (e) => {
+    state.feeRole = e.target.value === 'maker' ? 'maker' : 'taker';
+    save(); refreshDerived();
+  });
 
   document.getElementById('exportBtn').addEventListener('click', exportJSON);
   document.getElementById('importFile').addEventListener('change', importJSON);
@@ -526,7 +625,7 @@ function openLog(row) {
     f.side.value = 'YES';
     f.price.value = row.ask;
     f.contracts.value = Math.max(1, row.contracts);
-    f.note.value = `${pts(row.edge)} pts edge vs ${row.source}`;
+    f.note.value = `${pts(row.edge)} pts net edge (blend ${pct(row.blend, 1)} vs ${row.ask}c)`;
   } else {
     document.getElementById('logTitle').textContent = 'Log a position manually';
     f.reset();
@@ -592,13 +691,26 @@ async function loadLeague(league) {
   if (kalshiRes.status === 'rejected') problems.push(`Kalshi (${kalshiRes.reason.message})`);
   if (problems.length) toast(`Could not load ${problems.join(' and ')}.`);
 
+  computeRest(games);
   matched = buildRows();
   renderEdges();
+
+  // Pull ESPN's model only for the games that actually matched a market.
+  const ids = [...new Set(matched.map((r) => String(r.game.id).replace(/^[a-z]+-/, '')))].slice(0, 60);
+  if (ids.length) {
+    try {
+      const fp = await getJSON(`/api/predictor?league=${league}&ids=${ids.join(',')}`);
+      fpiCache = new Map(Object.entries(fp.predictions || {}));
+      matched = buildRows();
+      renderEdges();
+    } catch { /* the blend simply falls back to the book alone */ }
+  }
 
   const withLine = games.filter((g) => g.fair).length;
   document.getElementById('deskGenerated').textContent =
     `${games.length} games · ${withLine} with a line · ${kalshiEvents.length} Kalshi events · `
-    + `${matched.length} matched · ${matched.filter((r) => r.quoted).length} quoted`;
+    + `${matched.length} matched · ${matched.filter((r) => r.quoted).length} quoted · `
+    + `${fpiCache.size} with an ESPN projection`;
 }
 
 async function refreshMarks() {

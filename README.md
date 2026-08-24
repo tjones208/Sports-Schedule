@@ -34,6 +34,8 @@ GET /api/schedule?league=nfl&debug=1         # upstream request count and timing
 
 GET /api/kalshi?series=KXNFLGAME             # open events + market prices
 GET /api/kalshi?tickers=TICKER1,TICKER2      # prices for specific markets
+
+GET /api/predictor?league=nfl&ids=401872925  # ESPN FPI projections for those games
 ```
 
 Schedule responses include `odds` (the sportsbook line) and `fair` (vig-free win
@@ -113,6 +115,38 @@ a stake with fractional Kelly.
 - Kalshi events are matched to games by the ticker's `AWAY+HOME` abbreviation pair
   (`KXNFLGAME-26SEP13TBCIN`), with city names as a fallback
 - Stakes default to quarter Kelly, capped at 5% of bankroll per position
+
+### Fee-adjusted edge
+
+Kalshi's published schedule charges takers 7% of `contracts x price x (1 - price)`,
+rounded up to the cent; makers pay a quarter of that. The curve peaks at **1.75c per
+contract at 50c** and falls toward zero at the extremes, so fees bite hardest exactly
+where most edges live.
+
+Fees are modelled as a worse entry price. Paying `price + fee` to win `100 - price - fee`
+means the breakeven probability is simply the fee-inclusive price, and Kelly sizes
+against that same number - so a row can never show a negative edge next to a positive
+stake. The table shows net edge with the gross figure underneath, plus the dollar fee on
+the recommended order.
+
+A 2-point gross edge at 52c is only 0.25 points net. That is the whole reason this
+column exists.
+
+### Second opinion: ESPN FPI
+
+`/api/predictor` returns ESPN's own matchup projection, which is built from team ratings
+rather than from the betting line, so it is genuinely independent of the book.
+
+The **Blend** column weights the book and FPI (65/35 by default, adjustable down to
+book-only) and is what edge and stake are computed from. When the two disagree by 8
+points or more the row is flagged - that disagreement usually means the game is harder
+to price than the numbers suggest, and is a reason to size down or skip rather than to
+bet bigger.
+
+### Rest days
+
+Days since each team last played, derived from the schedule already loaded. Flagged when
+either side is on four days or less, or when the two sides differ by three or more days.
 
 Kalshi lists game markets well before it opens an order book on them. Until then
 a market has no bid or ask, so those rows show as *no book* with the sportsbook

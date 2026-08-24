@@ -427,3 +427,14 @@ dialog menu { display: flex; gap: 8px; justify-content: flex-end; padding: 14px 
 
 .pending { color: var(--ink-faint); font-family: var(--sans); font-size: 11.5px; font-style: italic; }
 .btn.sm[disabled] { opacity: 0.4; cursor: not-allowed; }
+
+.warnchip, .restchip {
+  display: inline-block; font-family: var(--mono); font-size: 10px;
+  padding: 1px 5px; border: 1px solid var(--rule); white-space: nowrap;
+}
+.warnchip { color: var(--down); border-color: color-mix(in srgb, var(--down) 40%, var(--rule)); }
+.restchip { color: var(--ink-faint); }
+.settings-grid select {
+  font-family: var(--sans); font-size: 14px; padding: 7px 9px;
+  border: 1px solid var(--rule); background: var(--card); color: var(--ink);
+}
