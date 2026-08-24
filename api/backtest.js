@@ -232,6 +232,44 @@ export default async function handler(req, res) {
 
     if (!rows.length) { res.status(200).json({ league, start, end, games: 0, note: 'no completed games with a projection' }); return; }
 
+    // ?dataset=1 returns one compact record per game and nothing else.
+    //
+    // This is what the Backtest tab pulls. Every derived number - bands, the
+    // discount sweep, P&L, fees, calibration - is recomputed in the browser
+    // from these rows, so changing a variable is instant and does not re-hit
+    // ESPN. Keys are single letters because a full NBA season is 1,200+ of
+    // these and the field names would otherwise outweigh the data.
+    //
+    //   d date, p favourite's FPI probability, w did the favourite win,
+    //   m the same favourite's vig-free market probability (null when unknown),
+    //   f favourite abbreviation, o opponent abbreviation
+    if (q.dataset === '1') {
+      const dataset = rows.map((r) => {
+        const favIsHome = r.fpiHome >= 0.5;
+        return {
+          d: r.date,
+          p: Number(Math.max(r.fpiHome, 1 - r.fpiHome).toFixed(4)),
+          w: (favIsHome === r.homeWon) ? 1 : 0,
+          m: r.marketHome == null ? null
+            : Number((favIsHome ? r.marketHome : 1 - r.marketHome).toFixed(4)),
+          f: favIsHome ? r.home : r.away,
+          o: favIsHome ? r.away : r.home,
+        };
+      });
+      res.setHeader('Cache-Control', 'public, s-maxage=86400');
+      res.status(200).json({
+        league, start, end, year, weeks, fbsOnly,
+        gamesFound: raw.length,
+        gamesScored: rows.length,
+        withMarket: dataset.filter((g) => g.m != null).length,
+        completedGamesOnScoreboard: completedAll,
+        lines: lineJoin && { matchRate: lineJoin.matchRate, priced: lineJoin.priced,
+          error: lineJoin.error || undefined },
+        dataset,
+      });
+      return;
+    }
+
     // 3. Score it
     const score = (probOf) => {
       const used = rows.filter((r) => probOf(r) != null);

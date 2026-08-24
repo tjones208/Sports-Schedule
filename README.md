@@ -234,6 +234,72 @@ requirement, rounded up.
 **NFL, NBA, NHL and college basketball are shown because every sport was asked for, but no
 equivalent backtest has been run on them.** Treat those rows as untested.
 
+### Backtest tab
+
+Runs the strategy against a finished season with whatever variables you set. Pick a
+sport and a season, press **Load season**, and it pulls every completed game plus
+ESPN's pregame FPI projection for it. After that the data sits in the browser and
+every variable re-simulates instantly - nothing re-hits ESPN.
+
+What you can change:
+
+| Variable | What it does |
+|---|---|
+| FPI range | lower and upper bound on the favourite's projected win probability |
+| Discount | points below FPI, from -10 to 40 |
+| Add fee on top | switches the requirement to `fee + N` instead of a flat `N` |
+| Size | contracts per game |
+| Fee | taker or maker |
+| Price | assume FPI minus the discount, or use the real closing line |
+| Slippage | points of cost added to the market price |
+
+**The two price modes answer different questions, and the tab says which is which.**
+
+*Assume FPI minus discount* buys every game in the band at exactly that price. There
+is no selection - it measures what a fixed discount would have paid. The discount **is**
+the price here, so profit rises in a straight line with it and the tab reports a
+break-even discount, solved numerically.
+
+*Use real closing line* pays the actual vig-free closing price plus slippage, and only
+takes a game when the market was already that far below FPI. Here the discount is a
+**filter**, not a price: raising it removes games rather than cheapening them, profit
+is a step function that can move either way, and there is no single break-even - so the
+tab shows a dash rather than a number a bisection would have invented. Read the sweep
+table instead. This mode needs historical lines, which come from CollegeFootballData and
+cover college football only.
+
+Output is a summary (bets, record, profit, ROI, break-even, actual vs FPI-expected wins,
+fees, max drawdown, t-statistic, Brier), a cumulative P&L curve you can hover to read any
+individual game, a discount sweep, a per-band breakdown, and a calibration table.
+
+The calibration table is the strategy in one view: where FPI says 75% and teams won 75%,
+the only cost is the fee; where it says 75% and they won 70%, that five-point gap is what
+the discount is paying for.
+
+#### Reading the t-statistic
+
+Profit alone does not establish an edge. The t-statistic asks whether the per-game result
+is distinguishable from luck. Below about 2, a profitable season is one season of noise -
+which is exactly what the 2023-2025 college football numbers showed, where a single season
+carried most of the pooled profit.
+
+#### How a season is fetched
+
+Football is walked by week through the core API, which paginates properly. Basketball and
+hockey are swept by date in short windows, because the site scoreboard silently caps at 25
+events per request no matter what `limit` says. Requests run three at a time with a
+progress count, results are deduped on date-plus-matchup at the seams, and the finished
+season is cached in localStorage - so loading it is slow once and instant afterwards.
+*Export data* writes the dataset out as JSON, and *Clear cached seasons* drops it.
+
+Older seasons are more likely to have had their projections dropped by ESPN, so a season
+that returns nothing is usually that rather than a fault.
+
+The simulation itself is `public/simulate.mjs`, a plain ES module with no DOM and no
+network. `test/simulate.test.mjs` imports the same file the browser does, so the numbers
+on screen are the numbers under test - including a check that its copy of the fee formula
+matches `lib/fees.mjs` at every price and both fee roles.
+
 **Positions** tracks what you took, marks it to the live Kalshi bid, and settles it
 won or lost. **Performance** reports record, ROI on stake, P&L by league, and a
 calibration table - whether contracts you bought near 60c actually won about 60% of

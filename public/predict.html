@@ -46,6 +46,7 @@
     <div class="leagues" id="tabs">
       <button class="lg" data-tab="edges" aria-pressed="true">Edges</button>
       <button class="lg" data-tab="fpi" aria-pressed="false">FPI strategy <span class="ct" id="fpiCount"></span></button>
+      <button class="lg" data-tab="backtest" aria-pressed="false">Backtest</button>
       <button class="lg" data-tab="positions" aria-pressed="false">Positions <span class="ct" id="posCount">0</span></button>
       <button class="lg" data-tab="performance" aria-pressed="false">Performance</button>
       <button class="lg" data-tab="settings" aria-pressed="false">Settings</button>
@@ -136,6 +137,61 @@
       <button class="btn" id="fpiReload" type="button">Reload all sports</button>
     </div>
     <div id="fpiOut"></div>
+  </section>
+
+  <!-- BACKTEST -->
+  <section id="panel-backtest" class="panel" hidden>
+    <div class="filters">
+      <select id="btLeague" aria-label="Sport">
+        <option value="ncaaf">College Football</option>
+        <option value="nfl">NFL</option>
+        <option value="nba">NBA</option>
+        <option value="nhl">NHL</option>
+        <option value="ncaab">College Basketball</option>
+      </select>
+      <select id="btSeason" aria-label="Season"></select>
+      <button class="btn primary" id="btLoad" type="button">Load season</button>
+      <span class="spacer"></span>
+      <button class="btn" id="btExport" type="button">Export data</button>
+      <button class="btn" id="btForget" type="button">Clear cached seasons</button>
+    </div>
+
+    <div class="filters">
+      <label class="toggle" for="btLow">FPI
+        <input type="number" id="btLow" min="50" max="100" step="1" value="50" style="width:58px" aria-label="Lower FPI bound, percent">
+        <span>&ndash;</span>
+        <input type="number" id="btHigh" min="50" max="100" step="1" value="100" style="width:58px" aria-label="Upper FPI bound, percent">
+        <span>%</span>
+      </label>
+      <label class="toggle" for="btDisc">Discount
+        <input type="number" id="btDisc" min="-10" max="40" step="0.5" value="5" style="width:64px" aria-label="Points below FPI">
+        <span>pts</span>
+      </label>
+      <label class="toggle"><input type="checkbox" id="btAddFee"> Add fee on top</label>
+      <label class="toggle" for="btQty">Size
+        <input type="number" id="btQty" min="1" max="10000" step="1" value="100" style="width:70px" aria-label="Contracts per game">
+        <span>ct</span>
+      </label>
+      <label class="toggle" for="btRole">Fee
+        <select id="btRole" aria-label="Fee role">
+          <option value="taker">Taker</option>
+          <option value="maker">Maker</option>
+        </select>
+      </label>
+      <label class="toggle" for="btPriceMode">Price
+        <select id="btPriceMode" aria-label="Price assumption">
+          <option value="fpi">Assume FPI minus discount</option>
+          <option value="market">Use real closing line</option>
+        </select>
+      </label>
+      <label class="toggle" for="btSpread">Slippage
+        <input type="number" id="btSpread" min="0" max="10" step="0.5" value="0" style="width:58px" aria-label="Slippage in points">
+        <span>pts</span>
+      </label>
+      <button class="btn" id="btReset" type="button">Reset variables</button>
+    </div>
+
+    <div id="btOut"></div>
   </section>
 
   <!-- POSITIONS -->

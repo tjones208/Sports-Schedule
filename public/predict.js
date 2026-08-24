@@ -937,6 +937,527 @@ function wireFpi() {
   });
 }
 
+/* ---------- Backtest tab ----------
+
+   Pulls a finished season from /api/backtest?dataset=1 once, then runs every
+   variable against it in the browser. Changing the discount, the band, the
+   contract size or the price assumption re-simulates instantly and never
+   re-hits ESPN.
+
+   The simulation itself lives in public/simulate.mjs so that the Node tests in
+   test/simulate.test.mjs exercise the exact code the page runs.             */
+
+// How a season is walked. Football has real week numbers and the core API
+// paginates them properly; the other sports have to be swept by date.
+const BT_PLAN = {
+  ncaaf: { mode: 'weeks', weeks: 15, chunk: 3, seasontype: '2', label: (y) => `${y}` },
+  nfl: { mode: 'weeks', weeks: 18, chunk: 5, seasontype: '2', label: (y) => `${y}` },
+  nba: { mode: 'dates', from: (y) => `${y}-10-15`, to: (y) => `${y + 1}-04-15`, chunk: 7,
+    label: (y) => `${y}-${String((y + 1) % 100).padStart(2, '0')}` },
+  nhl: { mode: 'dates', from: (y) => `${y}-10-01`, to: (y) => `${y + 1}-04-18`, chunk: 7,
+    label: (y) => `${y}-${String((y + 1) % 100).padStart(2, '0')}` },
+  ncaab: { mode: 'dates', from: (y) => `${y}-11-01`, to: (y) => `${y + 1}-03-15`, chunk: 5,
+    label: (y) => `${y}-${String((y + 1) % 100).padStart(2, '0')}` },
+};
+const BT_SEASONS = [2025, 2024, 2023, 2022, 2021];
+const BT_CACHE_PREFIX = 'ss:bt:';
+const BT_DEFAULTS = {
+  lowPct: 50, highPct: 100, discountPts: 5, addFee: false,
+  contracts: 100, role: 'taker', priceMode: 'fpi', spreadPts: 0,
+};
+
+let Sim = null;              // lazily imported public/simulate.mjs
+let btData = null;           // { league, year, dataset, withMarket, ... }
+let btOpts = { ...BT_DEFAULTS };
+let btRunToken = 0;          // cancels a load when the user starts another
+
+async function loadSim() {
+  if (!Sim) Sim = await import('./simulate.mjs');
+  return Sim;
+}
+
+/* ---------- season cache ---------- */
+
+const btKey = (league, year) => `${BT_CACHE_PREFIX}${league}:${year}`;
+
+function btCacheRead(league, year) {
+  try {
+    const raw = localStorage.getItem(btKey(league, year));
+    if (!raw) return null;
+    const j = JSON.parse(raw);
+    return Array.isArray(j.dataset) ? j : null;
+  } catch { return null; }
+}
+function btCacheWrite(league, year, payload) {
+  try { localStorage.setItem(btKey(league, year), JSON.stringify(payload)); return true; }
+  catch { return false; }   // a full quota is not worth failing the load over
+}
+function btCacheClear() {
+  const kill = [];
+  for (let i = 0; i < localStorage.length; i++) {
+    const k = localStorage.key(i);
+    if (k && k.startsWith(BT_CACHE_PREFIX)) kill.push(k);
+  }
+  kill.forEach((k) => localStorage.removeItem(k));
+  return kill.length;
+}
+function btCachedSeasons() {
+  const out = [];
+  for (let i = 0; i < localStorage.length; i++) {
+    const k = localStorage.key(i);
+    if (!k || !k.startsWith(BT_CACHE_PREFIX)) continue;
+    const [, league, year] = k.split(':');
+    let n = 0;
+    try { n = (JSON.parse(localStorage.getItem(k)).dataset || []).length; } catch { /* skip */ }
+    out.push({ league, year, games: n });
+  }
+  return out.sort((a, b) => a.league.localeCompare(b.league) || b.year.localeCompare(a.year));
+}
+
+/* ---------- loading ---------- */
+
+/** The list of /api/backtest requests that together cover one season. */
+function btChunks(league, year) {
+  const plan = BT_PLAN[league];
+  const out = [];
+  if (plan.mode === 'weeks') {
+    for (let w = 1; w <= plan.weeks; w += plan.chunk) {
+      const list = [];
+      for (let k = w; k < w + plan.chunk && k <= plan.weeks; k++) list.push(k);
+      out.push(`league=${league}&year=${year}&weeks=${list.join(',')}&seasontype=${plan.seasontype}`);
+    }
+    return out;
+  }
+  let cur = plan.from(year);
+  const last = plan.to(year);
+  while (cur <= last) {
+    const end = addDays(cur, plan.chunk - 1);
+    out.push(`league=${league}&start=${cur}&end=${end > last ? last : end}`);
+    cur = addDays(cur, plan.chunk);
+  }
+  return out;
+}
+
+function btStatus(html) {
+  const el = document.getElementById('btOut');
+  const bar = el.querySelector('#btProgress');
+  if (bar) bar.innerHTML = html; else el.innerHTML = `<div class="empty" id="btProgress">${html}</div>`;
+}
+
+async function btLoadSeason(league, year, { force = false } = {}) {
+  const token = ++btRunToken;
+  const cached = force ? null : btCacheRead(league, year);
+  if (cached) {
+    btData = { league, year, ...cached };
+    await renderBacktest();
+    return;
+  }
+
+  const chunks = btChunks(league, year);
+  const label = BT_PLAN[league].label(Number(year));
+  let done = 0;
+  const collected = [];
+  const failures = [];
+
+  btStatus(`<h3>Loading ${esc(LEAGUE_LABEL[league])} ${esc(label)}</h3>
+    <p>0 of ${chunks.length} requests &middot; 0 games. Every finished game needs its own
+    ESPN projection lookup, so a full season takes a while. It is cached afterwards.</p>`);
+
+  // Three at a time: enough to keep it moving, gentle enough not to get throttled.
+  let idx = 0;
+  await Promise.all(Array.from({ length: Math.min(3, chunks.length) }, async () => {
+    while (idx < chunks.length) {
+      const q = chunks[idx++];
+      if (token !== btRunToken) return;
+      try {
+        const j = await getJSON(`/api/backtest?${q}&dataset=1&sample=0`);
+        if (Array.isArray(j.dataset)) collected.push(...j.dataset);
+      } catch (err) {
+        failures.push(err.message);
+      }
+      done++;
+      if (token !== btRunToken) return;
+      btStatus(`<h3>Loading ${esc(LEAGUE_LABEL[league])} ${esc(label)}</h3>
+        <p>${done} of ${chunks.length} requests &middot; ${collected.length} games${
+        failures.length ? ` &middot; ${failures.length} request(s) failed` : ''}</p>`);
+    }
+  }));
+
+  if (token !== btRunToken) return;
+
+  // Date windows can overlap at the seams and week mode can repeat a game that
+  // moved weeks, so dedupe on the matchup rather than trusting the sweep.
+  const seen = new Set();
+  const dataset = collected.filter((g) => {
+    const k = `${g.d}|${g.f}|${g.o}`;
+    if (seen.has(k)) return false;
+    seen.add(k);
+    return true;
+  });
+
+  if (!dataset.length) {
+    document.getElementById('btOut').innerHTML = `<div class="empty">
+      <h3>Nothing came back</h3>
+      <p>${failures.length
+        ? `All ${chunks.length} requests failed. First error: ${esc(failures[0])}.`
+        : `ESPN returned no finished games with a projection for ${esc(LEAGUE_LABEL[league])} ${esc(label)}. `
+          + 'Older seasons are more likely to have had their projections dropped.'}</p></div>`;
+    return;
+  }
+
+  const payload = {
+    dataset,
+    withMarket: dataset.filter((g) => g.m != null).length,
+    savedAt: new Date().toISOString(),
+    requests: chunks.length,
+    failed: failures.length,
+  };
+  const stored = btCacheWrite(league, year, payload);
+  btData = { league, year, ...payload, stored };
+  await renderBacktest();
+}
+
+/* ---------- equity curve ---------- */
+
+/**
+ * Cumulative P&L in date order. One series, so no legend - the heading names
+ * it. The line takes its colour from the final result, the zero line and axes
+ * stay recessive, and every label wears a text token rather than the series
+ * colour.
+ */
+function btEquitySvg(equity, ordered) {
+  if (equity.length < 2) return '';
+  const W = 760, H = 210;
+  const PAD = { l: 58, r: 18, t: 14, b: 24 };
+  const iw = W - PAD.l - PAD.r;
+  const ih = H - PAD.t - PAD.b;
+  const min = Math.min(0, ...equity);
+  const max = Math.max(0, ...equity);
+  const span = (max - min) || 1;
+  const X = (i) => PAD.l + (i / (equity.length - 1)) * iw;
+  const Y = (v) => PAD.t + ih - ((v - min) / span) * ih;
+
+  const path = equity.map((v, i) => `${i ? 'L' : 'M'}${X(i).toFixed(1)},${Y(v).toFixed(1)}`).join('');
+  const final = equity[equity.length - 1];
+  const tone = final >= 0 ? 'var(--up)' : 'var(--down)';
+
+  // Gridlines on a 1/2/5 ladder, so the axis reads 500 / 1,000 / 1,500 rather
+  // than whatever the data's min and max happen to be.
+  const rawStep = span / 4;
+  const mag = 10 ** Math.floor(Math.log10(rawStep));
+  const step = [1, 2, 5, 10].find((m) => m * mag >= rawStep) * mag;
+  const ticks = [];
+  for (let v = Math.ceil(min / step) * step; v <= max + 1e-9; v += step) {
+    ticks.push({ v, y: Y(v) });
+  }
+
+  return `<figure class="chart">
+    <figcaption>Cumulative profit and loss, in date order</figcaption>
+    <svg viewBox="0 0 ${W} ${H}" role="img" preserveAspectRatio="xMidYMid meet"
+      aria-label="Cumulative profit and loss across ${equity.length} games, ending at ${money(final)}">
+      ${ticks.map((t) => `<line x1="${PAD.l}" x2="${W - PAD.r}" y1="${t.y.toFixed(1)}" y2="${t.y.toFixed(1)}" class="grid"/>
+        <text x="${PAD.l - 8}" y="${(t.y + 3.5).toFixed(1)}" class="axis" text-anchor="end">${
+          Math.abs(t.v) >= 1000 ? `${(t.v / 1000).toFixed(Math.abs(t.v) % 1000 ? 1 : 0)}k`
+            : t.v.toFixed(step < 1 ? 1 : 0)}</text>`).join('')}
+      <line x1="${PAD.l}" x2="${W - PAD.r}" y1="${Y(0).toFixed(1)}" y2="${Y(0).toFixed(1)}" class="zero"/>
+      <path d="${path}" fill="none" stroke="${tone}" stroke-width="2"
+        stroke-linejoin="round" stroke-linecap="round" vector-effect="non-scaling-stroke"/>
+      <g class="hover" hidden>
+        <line class="cross" y1="${PAD.t}" y2="${PAD.t + ih}"/>
+        <circle r="4" class="dot" style="fill:${tone}"/>
+      </g>
+      <text x="${PAD.l}" y="${H - 6}" class="axis">${esc(ordered[0]?.d || '')}</text>
+      <text x="${W - PAD.r}" y="${H - 6}" class="axis" text-anchor="end">${esc(ordered[ordered.length - 1]?.d || '')}</text>
+    </svg>
+    <div class="chart-readout" id="btReadout"><span class="muted">Hover the line to read any point.</span></div>
+  </figure>`;
+}
+
+function wireEquityHover(equity, ordered) {
+  const fig = document.querySelector('#btOut .chart');
+  if (!fig) return;
+  const svg = fig.querySelector('svg');
+  const hover = fig.querySelector('.hover');
+  const cross = fig.querySelector('.cross');
+  const dot = fig.querySelector('.dot');
+  const out = fig.querySelector('#btReadout');
+  const W = 760, PAD = { l: 58, r: 18, t: 14, b: 24 }, H = 210;
+  const iw = W - PAD.l - PAD.r, ih = H - PAD.t - PAD.b;
+  const min = Math.min(0, ...equity), max = Math.max(0, ...equity);
+  const span = (max - min) || 1;
+
+  const move = (clientX) => {
+    const r = svg.getBoundingClientRect();
+    const vx = ((clientX - r.left) / r.width) * W;   // client px -> viewBox units
+    const i = Math.max(0, Math.min(equity.length - 1,
+      Math.round(((vx - PAD.l) / iw) * (equity.length - 1))));
+    const x = PAD.l + (i / (equity.length - 1)) * iw;
+    const y = PAD.t + ih - ((equity[i] - min) / span) * ih;
+    cross.setAttribute('x1', x); cross.setAttribute('x2', x);
+    dot.setAttribute('cx', x); dot.setAttribute('cy', y);
+    hover.removeAttribute('hidden');
+    const g = ordered[i];
+    out.innerHTML = `<strong>${money(equity[i])}</strong> after ${i + 1} game${i ? 's' : ''}
+      &middot; ${esc(g.d)} &middot; ${esc(g.f)} over ${esc(g.o)} at ${pct(g.p, 1)}
+      &middot; bought ${g.price.toFixed(1)}&cent; &middot; ${g.w ? 'won' : 'lost'}
+      <span data-tone="${g.pnl > 0 ? 'up' : 'down'}">${money(g.pnl)}</span>`;
+  };
+
+  svg.addEventListener('mousemove', (e) => move(e.clientX));
+  svg.addEventListener('touchmove', (e) => {
+    if (e.touches[0]) { move(e.touches[0].clientX); e.preventDefault(); }
+  }, { passive: false });
+  svg.addEventListener('mouseleave', () => {
+    hover.setAttribute('hidden', '');
+    out.innerHTML = '<span class="muted">Hover the line to read any point.</span>';
+  });
+}
+
+/* ---------- rendering ---------- */
+
+async function renderBacktest() {
+  const el = document.getElementById('btOut');
+  const S = await loadSim();
+
+  if (!btData) {
+    const cached = btCachedSeasons();
+    el.innerHTML = `<div class="empty">
+      <h3>No season loaded</h3>
+      <p>Pick a sport and a season and press <em>Load season</em>. It pulls every finished
+      game and ESPN's pregame FPI projection for it, then runs your variables against that
+      data locally &mdash; so once a season is loaded, changing anything is instant.</p>
+      ${cached.length ? `<p class="fineprint">Cached and ready: ${cached.map((c) => `${
+        esc(LEAGUE_LABEL[c.league] || c.league)} ${esc(c.year)} (${c.games} games)`).join(', ')}</p>` : ''}
+    </div>`;
+    return;
+  }
+
+  const { dataset, league, year, withMarket } = btData;
+  const opts = { ...btOpts };
+  const r = S.simulate(dataset, opts);
+  const sweep = S.discountSweep(dataset, opts);
+  const be = S.breakEvenDiscount(dataset, opts);
+  const label = BT_PLAN[league].label(Number(year));
+
+  const marketUnavailable = opts.priceMode === 'market' && withMarket === 0;
+
+  const modeLine = opts.priceMode === 'market'
+    ? `Buying at the real vig-free closing line${opts.spreadPts ? ` plus ${opts.spreadPts} pts of slippage` : ''},
+       only when it already sat ${opts.discountPts} pts or more below FPI.`
+    : `Assuming Kalshi offered exactly FPI minus ${opts.discountPts} pts on every game in the band.`;
+
+  const stat = (k, v, cls = '') => `<div class="stat"><span class="n ${cls}">${v}</span><span class="k">${k}</span></div>`;
+  const sign = (n) => (n > 0 ? 'up' : n < 0 ? 'down' : '');
+
+  el.innerHTML = `
+  <div class="summary">
+    ${stat('Bets placed', r.taken)}
+    ${stat('Record', r.taken ? `${r.wins}-${r.losses}` : '--')}
+    ${stat('Profit', money(r.profit), sign(r.profit))}
+    ${stat('ROI on stake', r.roi == null ? '--' : pct(r.roi, 1), sign(r.roi || 0))}
+    ${stat('Per game', r.taken ? money(r.perGame) : '--', sign(r.perGame))}
+    ${stat('Break-even discount', be == null ? '--' : be.toFixed(2))}
+  </div>
+
+  ${marketUnavailable ? `<div class="callout"><strong>No closing lines in this dataset.</strong>
+    Historical market prices come from CollegeFootballData, which covers college football only and
+    needs <code>CFBD_API_KEY</code> set on the deployment. Every other sport can only be run on the
+    <em>Assume FPI minus discount</em> setting, because Kalshi does not retain last season's
+    markets and nothing else here has a price to look up.</div>` : ''}
+
+  ${r.taken ? `
+  <div class="summary sub">
+    ${stat('Actual wins', r.wins)}
+    ${stat('FPI expected', r.expectedWins.toFixed(1))}
+    ${stat('Difference', `${r.winsVsExpected >= 0 ? '+' : ''}${r.winsVsExpected.toFixed(1)}`, sign(r.winsVsExpected))}
+    ${stat('Staked', money(r.staked))}
+    ${stat('Fees paid', money(r.fees), 'down')}
+    ${stat('Max drawdown', money(-r.maxDrawdown), r.maxDrawdown ? 'down' : '')}
+    ${stat('t-statistic', r.tStat == null ? '--' : r.tStat.toFixed(2),
+      r.tStat != null && Math.abs(r.tStat) >= 2 ? sign(r.tStat) : '')}
+    ${stat('Brier', r.brier == null ? '--' : r.brier.toFixed(4))}
+  </div>
+
+  ${btEquitySvg(r.equity, r.ordered)}
+  ` : `<div class="empty"><h3>No bets qualified</h3>
+    <p>${r.games} games fell in the ${opts.lowPct}-${opts.highPct}% band, but none cleared the rule.
+    ${r.skippedNoLine ? `${r.skippedNoLine} had no closing line. ` : ''}${
+      r.skippedTooRich ? `${r.skippedTooRich} were priced too richly.` : ''}</p></div>`}
+
+  <p class="fineprint"><strong>${esc(LEAGUE_LABEL[league])} ${esc(label)}</strong> &mdash;
+  ${dataset.length} finished games with an ESPN projection, ${withMarket} with a closing line.
+  ${esc(modeLine)} Fees are Kalshi's ${opts.role} schedule at ${opts.contracts} contracts a game.
+  <strong>Break-even discount</strong> is solved numerically: the number of points below FPI at which
+  this configuration returns exactly zero. <strong>t-statistic</strong> asks whether the profit is
+  distinguishable from luck &mdash; below about 2 it is one season of noise, not an edge.</p>
+
+  <h3 class="sec">How the result moves with the discount</h3>
+  <p class="fineprint">${opts.priceMode === 'market'
+    ? `In this mode the discount is a <strong>filter</strong>, not a price: raising it does not make
+       any bet cheaper, it just removes the games that were not already that far below FPI. So the
+       bet count falls as you go down the table, and there is no single break-even discount to
+       report &mdash; that is why the headline shows a dash.`
+    : `In this mode the discount <strong>is</strong> the price: every game in the band is bought at
+       FPI minus that many points, so the bet count never changes and profit rises in a straight
+       line. The break-even above is where that line crosses zero.`}</p>
+  <div class="tablewrap"><table class="tbl">
+    <thead><tr><th>Discount</th><th class="r">Bets</th><th class="r">Profit</th>
+      <th class="r">ROI</th><th class="r">Per game</th><th class="r">t</th><th></th></tr></thead>
+    <tbody>${sweep.map((s) => `<tr class="${Math.abs(s.discountPts - opts.discountPts) < 0.001 ? 'good' : ''}">
+      <td class="mono" data-label="Discount">${s.discountPts} pts</td>
+      <td class="r mono" data-label="Bets">${s.taken}</td>
+      <td class="r mono" data-label="Profit" data-tone="${sign(s.profit)}">${money(s.profit)}</td>
+      <td class="r mono" data-label="ROI">${s.roi == null ? '--' : pct(s.roi, 1)}</td>
+      <td class="r mono" data-label="Per game">${s.taken ? money(s.perGame) : '--'}</td>
+      <td class="r mono" data-label="t">${s.tStat == null ? '--' : s.tStat.toFixed(2)}</td>
+      <td class="r act"><button class="btn sm" data-setdisc="${s.discountPts}">Use</button></td>
+    </tr>`).join('')}</tbody></table></div>
+
+  <h3 class="sec">By FPI band</h3>
+  <div class="tablewrap"><table class="tbl">
+    <thead><tr><th>Band</th><th class="r">Bets</th><th class="r">Won</th><th class="r">FPI expected</th>
+      <th class="r">Profit</th><th class="r">Discount needed</th><th class="r">of which fee</th><th></th></tr></thead>
+    <tbody>${r.bands.map((b) => `<tr>
+      <td class="mono" data-label="Band">${b.lo}-${b.hi}%</td>
+      <td class="r mono" data-label="Bets">${b.games}</td>
+      <td class="r mono" data-label="Won">${b.games ? b.wins : '--'}</td>
+      <td class="r mono" data-label="FPI expected">${b.games ? b.expectedWins.toFixed(1) : '--'}</td>
+      <td class="r mono" data-label="Profit" data-tone="${b.games ? sign(b.profit) : ''}">${b.games ? money(b.profit) : '--'}</td>
+      <td class="r mono" data-label="Discount needed">${b.discountNeededPts == null ? '--'
+        : (opts.discountPts + b.discountNeededPts).toFixed(2)}</td>
+      <td class="r mono" data-label="of which fee">${b.feeInPts == null ? '--' : b.feeInPts.toFixed(2)}</td>
+      <td class="r act"><button class="btn sm" data-setband="${b.lo}-${b.hi}">Filter</button></td>
+    </tr>`).join('')}</tbody></table></div>
+  <p class="fineprint"><strong>Discount needed</strong> is the total points below FPI that band
+  required to break even, at the current settings. It is stated as an absolute requirement, so it
+  already includes whatever discount is set above &mdash; a band showing 3.4 needed 3.4 points,
+  whether you are currently running 0 or 8.</p>
+
+  <h3 class="sec">Is FPI calibrated?</h3>
+  <div class="tablewrap"><table class="tbl">
+    <thead><tr><th>Band</th><th class="r">Games</th><th class="r">FPI said</th>
+      <th class="r">Actually won</th><th class="r">Gap</th></tr></thead>
+    <tbody>${r.calibration.map((c) => `<tr>
+      <td class="mono" data-label="Band">${c.lo}-${c.hi}%</td>
+      <td class="r mono" data-label="Games">${c.games}</td>
+      <td class="r mono" data-label="FPI said">${c.predicted == null ? '--' : pct(c.predicted, 1)}</td>
+      <td class="r mono" data-label="Actually won">${c.actual == null ? '--' : pct(c.actual, 1)}</td>
+      <td class="r mono" data-label="Gap" data-tone="${c.gap == null ? '' : sign(c.gap)}">${
+        c.gap == null ? '--' : pts(c.gap)}</td></tr>`).join('')}</tbody></table></div>
+  <p class="fineprint">This is the whole strategy in one table. Where FPI says 75% and teams won
+  75%, the only cost is the fee. Where it says 75% and they won 70%, that five-point gap is what
+  the discount is paying for. This runs on every game in the band, not just the ones bet, so it
+  does not move when you change the price settings.</p>
+
+  <p class="fineprint">Loaded ${new Date(btData.savedAt).toLocaleString()}${
+    btData.stored === false ? ' &mdash; too large to cache in this browser, so it will reload next time'
+      : ' &middot; cached in this browser'}${
+    btData.failed ? ` &middot; ${btData.failed} of ${btData.requests} requests failed, so the season may be partial` : ''}.</p>`;
+
+  if (r.taken > 1) wireEquityHover(r.equity, r.ordered);
+
+  el.querySelectorAll('[data-setdisc]').forEach((b) => b.addEventListener('click', () => {
+    btOpts.discountPts = Number(b.dataset.setdisc);
+    syncBtControls(); renderBacktest();
+  }));
+  el.querySelectorAll('[data-setband]').forEach((b) => b.addEventListener('click', () => {
+    const [lo, hi] = b.dataset.setband.split('-').map(Number);
+    btOpts.lowPct = lo; btOpts.highPct = hi;
+    syncBtControls(); renderBacktest();
+  }));
+}
+
+/* ---------- controls ---------- */
+
+function syncBtControls() {
+  const set = (id, v) => { const e = document.getElementById(id); if (e) e.value = v; };
+  set('btLow', btOpts.lowPct);
+  set('btHigh', btOpts.highPct);
+  set('btDisc', btOpts.discountPts);
+  set('btQty', btOpts.contracts);
+  set('btRole', btOpts.role);
+  set('btPriceMode', btOpts.priceMode);
+  set('btSpread', btOpts.spreadPts);
+  const f = document.getElementById('btAddFee');
+  if (f) f.checked = btOpts.addFee;
+}
+
+function btFillSeasons() {
+  const league = document.getElementById('btLeague').value;
+  const sel = document.getElementById('btSeason');
+  const keep = sel.value;
+  sel.innerHTML = BT_SEASONS.map((y) =>
+    `<option value="${y}">${esc(BT_PLAN[league].label(y))}</option>`).join('');
+  if (BT_SEASONS.map(String).includes(keep)) sel.value = keep;
+}
+
+function wireBacktest() {
+  btFillSeasons();
+
+  document.getElementById('btLeague').addEventListener('change', () => {
+    btFillSeasons();
+    btData = null;
+    renderBacktest();
+  });
+  document.getElementById('btSeason').addEventListener('change', () => {
+    btData = null;
+    renderBacktest();
+  });
+  document.getElementById('btLoad').addEventListener('click', () => {
+    btLoadSeason(document.getElementById('btLeague').value,
+      document.getElementById('btSeason').value);
+  });
+
+  const num = (id, key, lo, hi) => document.getElementById(id).addEventListener('change', (e) => {
+    const v = Number(e.target.value);
+    if (!Number.isFinite(v)) { e.target.value = btOpts[key]; return; }
+    btOpts[key] = Math.min(hi, Math.max(lo, v));
+    e.target.value = btOpts[key];
+    renderBacktest();
+  });
+  num('btLow', 'lowPct', 50, 100);
+  num('btHigh', 'highPct', 50, 100);
+  num('btDisc', 'discountPts', -10, 40);
+  num('btQty', 'contracts', 1, 10000);
+  num('btSpread', 'spreadPts', 0, 10);
+
+  document.getElementById('btAddFee').addEventListener('change', (e) => {
+    btOpts.addFee = e.target.checked; renderBacktest();
+  });
+  document.getElementById('btRole').addEventListener('change', (e) => {
+    btOpts.role = e.target.value === 'maker' ? 'maker' : 'taker'; renderBacktest();
+  });
+  document.getElementById('btPriceMode').addEventListener('change', (e) => {
+    btOpts.priceMode = e.target.value === 'market' ? 'market' : 'fpi'; renderBacktest();
+  });
+  document.getElementById('btReset').addEventListener('click', () => {
+    btOpts = { ...BT_DEFAULTS };
+    syncBtControls(); renderBacktest();
+  });
+
+  document.getElementById('btExport').addEventListener('click', () => {
+    if (!btData) { toast('Load a season first.'); return; }
+    const blob = new Blob([JSON.stringify({
+      league: btData.league, season: btData.year, savedAt: btData.savedAt,
+      fields: { d: 'date', p: 'FPI favourite probability', w: 'favourite won',
+        m: 'market probability, vig removed', f: 'favourite', o: 'opponent' },
+      dataset: btData.dataset,
+    }, null, 2)], { type: 'application/json' });
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(blob);
+    a.download = `backtest-${btData.league}-${btData.year}.json`;
+    document.body.appendChild(a); a.click(); a.remove();
+    setTimeout(() => URL.revokeObjectURL(a.href), 1000);
+  });
+
+  document.getElementById('btForget').addEventListener('click', () => {
+    const n = btCacheClear();
+    btData = null;
+    renderBacktest();
+    toast(n ? `Cleared ${n} cached season(s).` : 'No cached seasons to clear.');
+  });
+}
+
 /* ---------- rendering: positions ---------- */
 
 function renderPositions() {
@@ -1279,7 +1800,7 @@ function refreshDerived() { matched = buildRows(); renderEdges(); }
 
 function showTab(name) {
   tab = name;
-  for (const p of ['edges', 'fpi', 'positions', 'performance', 'settings']) {
+  for (const p of ['edges', 'fpi', 'backtest', 'positions', 'performance', 'settings']) {
     document.getElementById(`panel-${p}`).hidden = p !== name;
   }
   document.querySelectorAll('#tabs .lg').forEach((b) => {
@@ -1290,6 +1811,8 @@ function showTab(name) {
   if (name === 'settings') renderSettings();
   // Five sports at once is an expensive load, so it waits until the tab is opened.
   if (name === 'fpi') { if (fpiLoaded || fpiLoading) renderFpi(); else loadFpiUniverse(); }
+  // The backtest pulls a whole finished season, so it waits to be asked.
+  if (name === 'backtest') renderBacktest();
 }
 
 document.getElementById('tabs').addEventListener('click', (e) => {
@@ -1336,6 +1859,8 @@ fpiFrom = todayMT();
 fpiTo = addDays(fpiFrom, FPI_WINDOW_DAYS);
 syncFpiControls();
 wireFpi();
+syncBtControls();
+wireBacktest();
 renderBank();
 renderPositions();
 showTab('edges');
