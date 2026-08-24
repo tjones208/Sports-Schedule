@@ -39,23 +39,39 @@ export default async function handler(req, res) {
   const L = LEAGUES[league];
   const start = /^\d{4}-\d{2}-\d{2}$/.test(q.start || '') ? q.start : null;
   const end = /^\d{4}-\d{2}-\d{2}$/.test(q.end || '') ? q.end : start;
-  if (!start) { res.status(400).json({ error: 'Pass ?start=YYYY-MM-DD[&end=]' }); return; }
+
+  // Week mode. Querying by date caps results well below a full Saturday slate,
+  // so a season backtest has to ask for whole weeks instead.
+  const year = /^\d{4}$/.test(q.year || '') ? q.year : null;
+  const weeks = String(q.weeks || '').split(',').map((w) => w.trim()).filter((w) => /^\d+$/.test(w));
+  const seasonType = /^[123]$/.test(q.seasontype || '') ? q.seasontype : '2';
+
+  if (!start && !(year && weeks.length)) {
+    res.status(400).json({ error: 'Pass ?start=YYYY-MM-DD[&end=] or ?year=2025&weeks=1,2,3[&seasontype=2]' });
+    return;
+  }
 
   try {
     const fbsOnly = league === 'ncaaf' && q.fbs !== '0';
-    const fbsIds = fbsOnly ? await getFbsTeamIds(String(start).slice(0, 4)) : null;
-    const days = dateRange(start, end);
+    const fbsIds = fbsOnly ? await getFbsTeamIds(year || String(start).slice(0, 4)) : null;
     const extra = new URLSearchParams({ limit: '1000', ...L.query }).toString();
+
+    const urls = year && weeks.length
+      ? weeks.map((w) => `${SITE}/${L.path}/scoreboard?year=${year}&seasontype=${seasonType}&week=${w}&${extra}`)
+      : dateRange(start, end).map((d) => `${SITE}/${L.path}/scoreboard?dates=${d}&${extra}`);
 
     // 1. Completed games in the window
     const raw = [];
     let completedAll = 0;
-    await pool(days, 14, async (d) => {
+    const seenIds = new Set();
+    await pool(urls, 14, async (url) => {
       try {
-        const j = await J(`${SITE}/${L.path}/scoreboard?dates=${d}&${extra}`);
+        const j = await J(url);
         for (const ev of j.events || []) {
           const c = ev.competitions?.[0];
           if (!c?.status?.type?.completed) continue;
+          if (seenIds.has(ev.id)) continue;   // weeks can overlap at the edges
+          seenIds.add(ev.id);
           completedAll++;
           if (fbsOnly && !isFbsMatchup(c, fbsIds)) continue;
           const home = c.competitors?.find((x) => x.homeAway === 'home');
@@ -140,7 +156,8 @@ export default async function handler(req, res) {
 
     res.setHeader('Cache-Control', 'public, s-maxage=86400');
     res.status(200).json({
-      league, start, end, fbsOnly,
+      league, start, end, year, weeks, fbsOnly,
+      requests: urls.length,
       // Completed games found vs those ESPN still has a projection for. A big
       // gap would mean the sample is not the season, just the part ESPN kept.
       completedGamesOnScoreboard: completedAll,
