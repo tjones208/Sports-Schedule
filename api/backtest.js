@@ -51,6 +51,25 @@ export default async function handler(req, res) {
     return;
   }
 
+  // ?probe=YYYYMMDD reports how many events come back at various limits, to
+  // find where ESPN's cap actually bites.
+  if (q.probe) {
+    const out = {};
+    for (const lim of ['25', '100', '300', '500', '900', '1000']) {
+      try {
+        const j = await J(`${SITE}/${L.path}/scoreboard?dates=${q.probe}&groups=80&limit=${lim}`);
+        out[`limit_${lim}`] = (j?.events || []).length;
+      } catch (e) { out[`limit_${lim}`] = `ERR ${e.message}`; }
+    }
+    try {
+      const j = await J(`${SITE}/${L.path}/scoreboard?dates=${q.probe}&limit=900`);
+      out.noGroups_limit900 = (j?.events || []).length;
+    } catch { /* ignore */ }
+    res.setHeader('Cache-Control', 'no-store');
+    res.status(200).json({ probe: q.probe, events: out });
+    return;
+  }
+
   try {
     const fbsOnly = league === 'ncaaf' && q.fbs !== '0';
     const fbsIds = fbsOnly ? await getFbsTeamIds(year || String(start).slice(0, 4)) : null;
