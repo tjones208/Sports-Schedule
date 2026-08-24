@@ -1,118 +1,117 @@
 # Sports Schedule
 
-A browsable board of the upcoming **NFL, NBA, NHL, college football and college
-basketball** seasons, with every start time converted to **Mountain time** and the
-**broadcast network** attached to each game.
+A board of the upcoming **NFL, NBA, NHL, college football and college basketball**
+seasons, with every start time in **Mountain time** and the **broadcast network**
+on each game.
+
+**Live:** https://sports-schedule-buckhorn1.vercel.app
+
+Schedules come from ESPN at request time through a serverless function, so the
+board is always current - there is no data file to regenerate.
+
+## How it works
 
 ```
-npm run fetch     # pull all five leagues from ESPN into ./data
-npm start         # open http://localhost:8080
+public/            the board (static HTML, CSS, JS - no build step)
+api/schedule.js    fetches a league's season from ESPN, converts to Mountain time
+api/leagues.js     the league catalogue
+lib/               shared modules, used by both the API and the CLI fetcher
 ```
 
----
+The browser asks `/api/schedule?league=nfl` for each league in parallel and paints
+each one as it arrives. The function requests ESPN in 30-day windows - a full NFL
+season is 9 upstream requests in about 175 ms - and the response is cached at the
+Vercel edge for six hours, so ESPN sees roughly one request per league per window.
 
-## Read this first: the schedule data is not included
-
-I could not pull the real schedules from this environment. Every sports data host
-is blocked by the session's network egress policy - the proxy returns `403` on
-`CONNECT` for all of them:
+### Endpoints
 
 ```
-site.api.espn.com   api-web.nhle.com    statsapi.web.nhl.com
-www.nba.com         www.nhl.com         www.espn.com
-data.ncaa.com       sports.yahoo.com    en.wikipedia.org
+GET /api/leagues
+GET /api/schedule?league=nfl
+GET /api/schedule?league=ncaab&start=2026-11-01&end=2026-11-30
+GET /api/schedule?league=nhl&tz=mst          # strict UTC-7 instead of local Mountain
+GET /api/schedule?league=nfl&debug=1         # upstream request count and timing
 ```
 
-Only `github.com`, `raw.githubusercontent.com`, `pypi.org` and `registry.npmjs.org`
-are reachable. That blocks both the shell and the web-fetch tooling, so roughly
-9,800 games across five leagues could not be retrieved and were **not** invented to
-fill the gap.
+| League | key | Season |
+| --- | --- | --- |
+| NFL | `nfl` | 2026 |
+| NBA | `nba` | 2026-27 |
+| NHL | `nhl` | 2026-27 |
+| College football (FBS) | `ncaaf` | 2026 |
+| College basketball (D-I) | `ncaab` | 2026-27 |
 
-What ships instead:
+### One thing worth knowing about ESPN
 
-- **A complete, working ingestion pipeline** (`scripts/fetch-schedules.mjs`) that
-  pulls all five leagues the moment it runs somewhere with network access.
-- **A labelled demo fixture** (`data/demo.json`) so the app is usable immediately.
-  It is clearly marked as sample data in the UI and is **not** the real schedule.
+ESPN's edge returns **403 to custom and spoofed browser User-Agents from
+datacenter IPs**. Sending no `User-Agent` override works. That single header was
+the difference between every request failing and every request succeeding, so
+don't "helpfully" add one back.
 
-Run `npm run fetch` on an unrestricted machine - or allow `site.api.espn.com` for
-this environment - and the app switches to live data automatically; the sample-data
-banner disappears on its own.
-
-## What `npm run fetch` retrieves
-
-| League | Source path | Season | Approx. games |
-| --- | --- | --- | --- |
-| NFL | `football/nfl` | 2026 | 272 + postseason |
-| NBA | `basketball/nba` | 2026-27 | ~1,230 |
-| NHL | `hockey/nhl` | 2026-27 | ~1,312 |
-| College football | `football/college-football` (FBS) | 2026 | ~900 |
-| College basketball | `basketball/mens-college-basketball` (D-I) | 2026-27 | ~6,000 |
-
-Data comes from ESPN's public scoreboard API. Each day in the season window is
-requested once, results are de-duplicated by event id, and the output is written to
-`data/<league>.json` plus a `data/index.json` summary.
+## Running it
 
 ```bash
-npm run fetch                                   # everything, default windows
+npm start        # board on http://localhost:8080, using the sample fixture
+npx vercel dev   # board + live API locally
+npm test         # parsing tests
+```
+
+`npm start` serves the static board only. With no API behind it the board falls
+back to `public/data/demo.json`, a small clearly-labelled sample set, and says so
+on screen. Use `vercel dev` when you want live schedules locally.
+
+### Pulling to files instead
+
+If you want the seasons as JSON on disk rather than through the API:
+
+```bash
+npm run fetch                                   # all five leagues -> public/data
+npm run fetch:mst                               # strict UTC-7 instead of local
 node scripts/fetch-schedules.mjs --league nfl,nba
 node scripts/fetch-schedules.mjs --start 2026-11-01 --end 2026-11-30
-node scripts/fetch-schedules.mjs --concurrency 4
 ```
 
-### A note on "MST"
+This needs direct network access to ESPN, so it will not work from a machine whose
+egress is restricted - use the deployed API in that case.
 
-Mountain time is **MDT (UTC-6)** during daylight saving and **MST (UTC-7)** the rest
-of the year. The switch lands on **1 November 2026**, part-way through every season
-here - so a single fixed offset would be wrong for one side of that date.
+## The board
 
-The default converts to true Mountain local time and labels each game `MDT` or `MST`,
-which is the wall-clock time you would actually tune in at. If you want strict
-UTC-7 year round instead, ignoring daylight saving:
-
-```bash
-npm run fetch:mst
-```
-
-## The app
-
-Static HTML, CSS and JavaScript - no build step, no dependencies.
-
-- Filter by league, network, or date; free-text search across teams, networks and venues
-- **National TV** toggle to cut down to nationally broadcast games
+- Filter by league, network or date; search across teams, networks and venues
+- **On TV** narrows to games with a listed broadcast
 - Star teams to follow them, then filter to **My teams** (saved in your browser)
-- Export the current filtered view to a `.ics` calendar file
-- Games with no announced broadcast are shown as *Not announced* rather than hidden
-- Renders ~10,000 games smoothly by paging as you scroll
-- Light and dark themes
-
-Press `/` to jump to the search box.
+- Export the filtered view to a `.ics` calendar file
+- Games with no announced broadcast show as *Not announced* rather than hidden
+- Pages in as you scroll, so full seasons stay responsive
+- Light and dark themes; press `/` to jump to search
 
 ### One-file build
 
-To share the app without a server, bundle it into a single HTML file with its
-data inlined:
-
 ```bash
-node scripts/build-standalone.mjs                      # dist/sports-schedule.html
-node scripts/build-standalone.mjs --data data/index.json   # bundle a real pull
-node scripts/build-standalone.mjs --fragment           # for embedding hosts
+node scripts/build-standalone.mjs      # dist/sports-schedule.html, data inlined
+node scripts/build-standalone.mjs --fragment
 ```
 
-## Layout
+## A note on "MST"
 
-```
-scripts/fetch-schedules.mjs   day-by-day pull, retries, de-duplication
-scripts/normalize.mjs         ESPN event -> flat game record
-scripts/time.mjs              UTC -> Mountain time (MST/MDT aware)
-scripts/leagues.mjs           league paths and season windows
-scripts/serve.mjs             dependency-free static server
-scripts/build-standalone.mjs  bundles the app + data into one HTML file
-web/                          the app
-data/demo.json                labelled sample data (committed)
-data/<league>.json            real pulls (git-ignored)
-test/normalize.test.mjs       parsing tests
-```
+Mountain time is **MDT (UTC-6)** during daylight saving and **MST (UTC-7)** the
+rest of the year, and the switch lands on **1 November 2026** - part-way through
+every season here. A single fixed offset would be wrong on one side of that date.
+
+The default converts to true Mountain local time and labels each game `MDT` or
+`MST`. Pass `tz=mst` (or `npm run fetch:mst`) to force strict UTC-7 year round.
+
+## Caveats
+
+- **College basketball is genuinely incomplete this far out.** As of late August
+  2026 ESPN lists about 330 D-I games for November with almost no tip times or
+  networks assigned. That is the real state of the schedule, not a bug - the
+  numbers fill in through September and October. Football and the pro leagues are
+  complete.
+- ESPN marks nearly every broadcast `national`, including ESPN+, so that flag is
+  not a useful filter. **On TV** filters on whether a network is listed at all.
+- ESPN revises times and networks; the six-hour edge cache is the refresh window.
+- College football is FBS only (`groups=80`); change it in `lib/leagues.mjs` for
+  all divisions.
 
 ## Tests
 
@@ -120,15 +119,6 @@ test/normalize.test.mjs       parsing tests
 npm test
 ```
 
-Covers Mountain-time conversion on both sides of the daylight-saving switch, network
-extraction from both ESPN response shapes, AP rankings, neutral sites, TBD tip times,
-and malformed events.
-
-## Caveats
-
-- **College basketball networks are genuinely incomplete this far out.** Many
-  non-conference games have no announced tip time or network in August; the fetcher
-  records them as TBD / *Not announced* rather than guessing.
-- ESPN occasionally revises times and networks. Re-run `npm run fetch` to refresh.
-- The college football pull is FBS only (`groups=80`); change it to `groups=90` in
-  `scripts/leagues.mjs` for all divisions.
+Covers Mountain-time conversion on both sides of the daylight-saving switch,
+network extraction from both ESPN response shapes, AP rankings, neutral sites, TBD
+tip times, and malformed events.

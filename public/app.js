@@ -16,7 +16,7 @@ const state = {
   league: 'all',
   query: '',
   network: 'all',
-  nationalOnly: false,
+  onTVOnly: false,
   favoritesOnly: false,
   from: '',
   rendered: 0,
@@ -137,7 +137,7 @@ function applyFilters() {
   state.filtered = state.games.filter((g) => {
     if (state.league !== 'all' && g.league !== state.league) return false;
     if (state.from && g.date < state.from) return false;
-    if (state.nationalOnly && !g.national) return false;
+    if (state.onTVOnly && g.networks.length === 0) return false;
     if (state.network !== 'all' && !g.networks.includes(state.network)) return false;
     if (state.favoritesOnly
       && !state.favorites.has(teamKey(g.home))
@@ -230,19 +230,18 @@ function renderChunk(reset) {
 function renderSummary() {
   const games = state.filtered;
   const networks = new Set();
-  let natl = 0;
+  let onTV = 0;
   let unannounced = 0;
   for (const g of games) {
     g.networks.forEach((n) => networks.add(n));
-    if (g.national) natl++;
-    if (g.networks.length === 0) unannounced++;
+    if (g.networks.length > 0) onTV++; else unannounced++;
   }
   const days = new Set(games.map((g) => g.date));
   const stats = [
     ['Games', games.length.toLocaleString()],
     ['Game days', days.size.toLocaleString()],
     ['Networks', networks.size.toLocaleString()],
-    ['National TV', natl.toLocaleString()],
+    ['On TV', onTV.toLocaleString()],
     ['No network yet', unannounced.toLocaleString()],
   ];
   document.getElementById('summary').innerHTML = stats
@@ -354,7 +353,7 @@ function wire() {
     state.from = e.target.value; refresh();
   });
   document.getElementById('natl').addEventListener('change', (e) => {
-    state.nationalOnly = e.target.checked; refresh();
+    state.onTVOnly = e.target.checked; refresh();
   });
   document.getElementById('favs').addEventListener('change', (e) => {
     state.favoritesOnly = e.target.checked; refresh();
@@ -366,7 +365,7 @@ function wire() {
   });
   document.getElementById('reset').addEventListener('click', () => {
     state.query = ''; state.network = 'all'; state.from = '';
-    state.nationalOnly = false; state.favoritesOnly = false; state.league = 'all';
+    state.onTVOnly = false; state.favoritesOnly = false; state.league = 'all';
     document.getElementById('q').value = '';
     document.getElementById('from').value = '';
     document.getElementById('natl').checked = false;
