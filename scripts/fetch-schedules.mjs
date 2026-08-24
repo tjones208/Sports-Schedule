@@ -22,6 +22,9 @@ import { normalizeEvent } from '../lib/normalize.mjs';
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
 const DATA_DIR = join(ROOT, 'public', 'data');
 const BASE = 'https://site.api.espn.com/apis/site/v2/sports';
+// ESPN silently falls back to 25 events when limit exceeds ~500, so a bigger
+// number returns FEWER games. 500 is the largest value it actually honours.
+const SCOREBOARD_LIMIT = '500';
 
 function parseArgs(argv) {
   const args = {};
@@ -93,7 +96,7 @@ async function fetchLeague(leagueId) {
   const end = args.end || league.end;
   const days = dateRange(start, end);
 
-  const extra = new URLSearchParams({ limit: '1000', ...league.query }).toString();
+  const extra = new URLSearchParams({ limit: SCOREBOARD_LIMIT, ...league.query }).toString();
   console.log(`\n${league.name} — ${days.length} days (${start} to ${end})`);
 
   const games = new Map();

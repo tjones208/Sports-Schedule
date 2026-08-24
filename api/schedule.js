@@ -1,3 +1,5 @@
+// ESPN silently falls back to 25 events when limit exceeds ~500.
+const SCOREBOARD_LIMIT = '500';
 // GET /api/schedule?league=nfl[&start=YYYY-MM-DD][&end=YYYY-MM-DD][&tz=mst][&debug=1]
 //
 // Runs on Vercel, so it reaches ESPN directly and returns normalized games with
@@ -95,7 +97,7 @@ export default async function handler(req, res) {
   // College football only: drop games against FCS opponents unless asked not to.
   const fbsOnly = league.id === 'ncaaf' && req.query.fbs !== '0';
   const fbsIds = fbsOnly ? await getFbsTeamIds(league.season) : null;
-  const extra = new URLSearchParams({ limit: '1000', ...league.query }).toString();
+  const extra = new URLSearchParams({ limit: SCOREBOARD_LIMIT, ...league.query }).toString();
   const started = Date.now();
   const games = new Map();
   const errors = [];

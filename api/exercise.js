@@ -15,6 +15,9 @@ import { kellyNet, orderFeeDollars, feePerContractCents, breakevenProbability } 
 import { getFbsTeamIds, isFbsMatchup, lastError as fbsError } from '../lib/divisions.mjs';
 
 const SITE = 'https://site.api.espn.com/apis/site/v2/sports';
+// ESPN silently falls back to 25 events when limit exceeds ~500, so a bigger
+// number returns FEWER games. 500 is the largest value it actually honours.
+const SCOREBOARD_LIMIT = '500';
 const CORE = 'https://sports.core.api.espn.com/v2/sports';
 const KB = 'https://api.elections.kalshi.com/trade-api/v2';
 const SERIES = { nfl: 'KXNFLGAME', nba: 'KXNBAGAME', nhl: 'KXNHLGAME', ncaaf: 'KXNCAAFGAME', ncaab: 'KXNCAABGAME' };
@@ -69,7 +72,7 @@ export default async function handler(req, res) {
     const events = (kj.events || []).filter((e) => parseTicker(e.event_ticker)?.date === date);
 
     // ESPN games that day
-    const extra = new URLSearchParams({ limit: '1000', ...L.query }).toString();
+    const extra = new URLSearchParams({ limit: SCOREBOARD_LIMIT, ...L.query }).toString();
     const sj = await J(`${SITE}/${L.path}/scoreboard?dates=${date.replace(/-/g, '')}&${extra}`);
     const fbsOnly = league === 'ncaaf' && q.fbs !== '0';
     const fbsIds = fbsOnly ? await getFbsTeamIds(L.season) : null;

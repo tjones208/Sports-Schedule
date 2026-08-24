@@ -14,6 +14,9 @@ import { getFbsTeamIds, isFbsMatchup } from '../lib/divisions.mjs';
 import { extractOdds, fairProbabilityConsensus } from '../lib/odds.mjs';
 
 const SITE = 'https://site.api.espn.com/apis/site/v2/sports';
+// ESPN silently falls back to 25 events when limit exceeds ~500, so a bigger
+// number returns FEWER games. 500 is the largest value it actually honours.
+const SCOREBOARD_LIMIT = '500';
 const CORE = 'https://sports.core.api.espn.com/v2/sports';
 const CORE_PATH = {
   nfl: 'football/leagues/nfl', nba: 'basketball/leagues/nba', nhl: 'hockey/leagues/nhl',
@@ -73,7 +76,7 @@ export default async function handler(req, res) {
   try {
     const fbsOnly = league === 'ncaaf' && q.fbs !== '0';
     const fbsIds = fbsOnly ? await getFbsTeamIds(year || String(start).slice(0, 4)) : null;
-    const extra = new URLSearchParams({ limit: '1000', ...L.query }).toString();
+    const extra = new URLSearchParams({ limit: SCOREBOARD_LIMIT, ...L.query }).toString();
 
     // 1. Completed games.
     //
@@ -129,7 +132,7 @@ export default async function handler(req, res) {
         try { await collectEvent(id); } catch { /* skip */ }
       });
     } else {
-      const extra2 = new URLSearchParams({ limit: '1000', ...L.query }).toString();
+      const extra2 = new URLSearchParams({ limit: SCOREBOARD_LIMIT, ...L.query }).toString();
       const days = dateRange(start, end);
       requests = days.length;
       await pool(days, 14, async (d) => {
