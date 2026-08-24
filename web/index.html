@@ -1,0 +1,65 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Mountain Time Sports Board</title>
+<meta name="description" content="NFL, NBA, NHL, college football and college basketball schedules in Mountain time with broadcast networks.">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Barlow+Condensed:wght@500;600&family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans:wght@400;500;600&display=swap">
+<link rel="stylesheet" href="styles.css">
+</head>
+<body>
+
+<header class="masthead">
+  <div class="wrap masthead-inner">
+    <div class="wordmark">
+      <h1>Mountain Time Sports Board</h1>
+      <span class="sub">NFL &middot; NBA &middot; NHL &middot; College Football &middot; College Basketball</span>
+    </div>
+    <div class="tz-badge">
+      <b id="tzname">America/Denver</b>
+      <span>all start times</span>
+    </div>
+  </div>
+</header>
+
+<main class="wrap">
+  <div class="notice" id="notice" role="status"></div>
+  <div class="summary" id="summary"></div>
+
+  <div class="controls">
+    <div class="leagues" id="leagues"></div>
+    <div class="filters">
+      <div class="field">
+        <input type="search" id="q" placeholder="Team, network or venue&hellip;  (press /)" aria-label="Search games">
+      </div>
+      <select id="network" aria-label="Filter by network"></select>
+      <label class="toggle" for="from">
+        <span>From</span>
+        <input type="date" id="from" aria-label="Show games on or after this date">
+      </label>
+      <button class="btn" id="today" type="button">Today</button>
+      <label class="toggle"><input type="checkbox" id="natl"> National TV</label>
+      <label class="toggle"><input type="checkbox" id="favs"> My teams</label>
+      <span class="spacer"></span>
+      <button class="btn" id="ics" type="button">Export .ics</button>
+      <button class="btn" id="reset" type="button">Reset</button>
+    </div>
+  </div>
+
+  <section id="listings" aria-live="polite"></section>
+  <div id="sentinel"></div>
+  <div class="more" id="more"></div>
+</main>
+
+<footer class="wrap">
+  <span>Star a team to follow it &mdash; kept in this browser.</span>
+  <span id="generated"></span>
+  <span>Times shown in Mountain time (MDT until Nov 1, MST after).</span>
+</footer>
+
+<script src="app.js"></script>
+</body>
+</html>

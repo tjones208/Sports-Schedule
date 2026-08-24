@@ -1,0 +1,7 @@
+node_modules/
+.DS_Store
+
+# Generated schedule pulls - regenerate with `npm run fetch`.
+# The labelled demo fixture is committed so the app runs out of the box.
+data/*.json
+!data/demo.json

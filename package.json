@@ -1,0 +1,17 @@
+{
+  "name": "sports-schedule",
+  "version": "1.0.0",
+  "private": true,
+  "description": "NFL, NBA, NHL, college football and college basketball schedules in Mountain time with broadcast networks.",
+  "type": "module",
+  "scripts": {
+    "fetch": "node scripts/fetch-schedules.mjs",
+    "fetch:mst": "node scripts/fetch-schedules.mjs --tz-mode mst",
+    "start": "node scripts/serve.mjs",
+    "test": "node --test test/*.test.mjs"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "license": "MIT"
+}
