@@ -13,6 +13,7 @@ import { dateRange } from '../lib/time.mjs';
 import { getFbsTeamIds, isFbsMatchup } from '../lib/divisions.mjs';
 import { extractOdds, fairProbabilityConsensus } from '../lib/odds.mjs';
 import { kellyNet, orderFeeDollars } from '../lib/fees.mjs';
+import { getSeasonLinesAll, normalizeTeam } from '../lib/cfbd.mjs';
 
 const SITE = 'https://site.api.espn.com/apis/site/v2/sports';
 // ESPN silently falls back to 25 events when limit exceeds ~500, so a bigger
@@ -106,6 +107,8 @@ export default async function handler(req, res) {
       raw.push({
         id: String(id), date: (sum?.header?.competitions?.[0]?.date || '').slice(0, 10),
         home: home.team?.abbreviation, away: away.team?.abbreviation,
+        homeName: home.team?.location || home.team?.displayName,
+        awayName: away.team?.location || away.team?.displayName,
         hs, as, homeWon: hs > as, odds: null,
       });
     }
@@ -153,6 +156,8 @@ export default async function handler(req, res) {
             if (!Number.isFinite(hs) || !Number.isFinite(as) || hs === as) continue;
             raw.push({ id: ev.id, date: ev.date?.slice(0, 10),
               home: home.team?.abbreviation, away: away.team?.abbreviation,
+              homeName: home.team?.location || home.team?.displayName,
+              awayName: away.team?.location || away.team?.displayName,
               hs, as, homeWon: hs > as, odds: extractOdds(c) });
           }
         } catch { /* skip the day */ }
@@ -174,6 +179,34 @@ export default async function handler(req, res) {
         rows.push({ ...g, fpiHome: p, marketHome: market ? market.home : null });
       } catch { /* game drops out */ }
     });
+
+    // Historical closing lines, when a CFBD key is configured. This is the only
+    // source that retains them, and it turns the P&L from a parameterised
+    // what-if into an actual number.
+    let lineJoin = null;
+    const cfbdKey = process.env.CFBD_API_KEY || q.key || '';
+    if (cfbdKey && league === 'ncaaf' && rows.length) {
+      try {
+        const season = year || String(start).slice(0, 4);
+        const lines = await getSeasonLinesAll(season, cfbdKey);
+        let matched = 0, priced = 0;
+        for (const r of rows) {
+          const hit = lines.get(`${normalizeTeam(r.awayName)}|${normalizeTeam(r.homeName)}`);
+          if (!hit) continue;
+          matched++;
+          const fair = fairProbabilityConsensus(
+            { homeML: hit.homeML, awayML: hit.awayML, spread: hit.spread }, league);
+          if (fair) { r.marketHome = fair.home; r.lineBooks = hit.books; priced++; }
+        }
+        lineJoin = { source: 'CollegeFootballData /lines', season,
+          linesLoaded: lines.size, matched, priced,
+          matchRate: Number(((matched / rows.length) * 100).toFixed(1)),
+          unmatchedSample: rows.filter((r) => !r.marketHome).slice(0, 5)
+            .map((r) => `${r.awayName} at ${r.homeName}`) };
+      } catch (err) {
+        lineJoin = { error: err.message };
+      }
+    }
 
     if (!rows.length) { res.status(200).json({ league, start, end, games: 0, note: 'no completed games with a projection' }); return; }
 
@@ -251,6 +284,48 @@ export default async function handler(req, res) {
         projectionsOver95: rows.filter((r) => Math.max(r.fpiHome, 1 - r.fpiHome) > 0.95).length,
         shareOver95: Number(((rows.filter((r) => Math.max(r.fpiHome, 1 - r.fpiHome) > 0.95).length / rows.length) * 100).toFixed(1)),
       },
+      lines: lineJoin,
+
+      // With real closing lines, the price is no longer assumed: this is what
+      // taking every FPI favourite at the market's vig-free price would have paid.
+      pnlAtMarket: (q.pnl === '1' && rows.some((r) => r.marketHome != null)) ? (() => {
+        const bankroll = Number(q.bankroll) || 5000;
+        const frac = Number(q.kelly) || 0.25;
+        const cap = Number(q.maxStake) || 0.05;
+        const flat = Number(q.flat) || 25;
+        const used = rows.filter((r) => r.marketHome != null);
+
+        const run = (mode) => {
+          let staked = 0, fees = 0, profit = 0, bets = 0, wins = 0;
+          for (const r of used) {
+            const p = Math.max(r.fpiHome, 1 - r.fpiHome);
+            const favIsHome = r.fpiHome >= 0.5;
+            const won = (favIsHome === r.homeWon);
+            const mkt = favIsHome ? r.marketHome : 1 - r.marketHome;
+            const ask = Math.min(99, Math.max(1, mkt * 100));
+            let stake;
+            if (mode === 'flat') stake = flat;
+            else {
+              const k = kellyNet(p, ask, frac, 'taker');
+              if (!k) continue;
+              stake = Math.min(k.staked, cap) * bankroll;
+            }
+            const contracts = Math.floor(stake / (ask / 100));
+            if (contracts < 1) continue;
+            const fee = orderFeeDollars(contracts, ask, 'taker');
+            const cost = contracts * (ask / 100) + fee;
+            bets++; wins += won ? 1 : 0; staked += cost; fees += fee;
+            profit += won ? contracts - cost : -cost;
+          }
+          return { bets, wins, winRate: bets ? Number(((wins / bets) * 100).toFixed(2)) : null,
+            staked: Number(staked.toFixed(2)), fees: Number(fees.toFixed(2)),
+            profit: Number(profit.toFixed(2)),
+            roi: staked ? Number(((profit / staked) * 100).toFixed(2)) : null,
+            endingBankroll: Number((bankroll + profit).toFixed(2)) };
+        };
+        return { gamesWithLine: used.length, kelly: run('kelly'), flat: run('flat') };
+      })() : undefined,
+
       // ?pnl=1 simulates taking every FPI favourite with the desk's own staking.
       //
       // Kalshi does not retain last season's markets, so there is no real entry
