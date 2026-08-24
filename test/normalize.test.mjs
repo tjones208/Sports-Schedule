@@ -2,8 +2,8 @@
 // scoreboard payloads. Run with: node --test test/
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { normalizeEvent, extractNetworks } from '../scripts/normalize.mjs';
-import { LEAGUES } from '../scripts/leagues.mjs';
+import { normalizeEvent, extractNetworks } from '../lib/normalize.mjs';
+import { LEAGUES } from '../lib/leagues.mjs';
 
 const nflEvent = {
   id: '401800001',
