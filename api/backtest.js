@@ -303,14 +303,19 @@ export default async function handler(req, res) {
         const flat = Number(q.flat) || 25;
         const used = rows.filter((r) => r.marketHome != null);
 
-        const run = (mode) => {
+        // The vig-free mid is not tradeable. On Kalshi you lift an ask above
+        // fair; at a book you pay the juice. spreadPts adds that cost in
+        // probability points, so a result that only works at the untradeable
+        // mid is exposed rather than reported as profit.
+        const run = (mode, spreadPts) => {
           let staked = 0, fees = 0, profit = 0, bets = 0, wins = 0;
+          const pnls = [];
           for (const r of used) {
             const p = Math.max(r.fpiHome, 1 - r.fpiHome);
             const favIsHome = r.fpiHome >= 0.5;
             const won = (favIsHome === r.homeWon);
             const mkt = favIsHome ? r.marketHome : 1 - r.marketHome;
-            const ask = Math.min(99, Math.max(1, mkt * 100));
+            const ask = Math.min(99, Math.max(1, mkt * 100 + spreadPts));
             let stake;
             if (mode === 'flat') stake = flat;
             else {
@@ -322,16 +327,24 @@ export default async function handler(req, res) {
             if (contracts < 1) continue;
             const fee = orderFeeDollars(contracts, ask, 'taker');
             const cost = contracts * (ask / 100) + fee;
+            const pl = won ? contracts - cost : -cost;
             bets++; wins += won ? 1 : 0; staked += cost; fees += fee;
-            profit += won ? contracts - cost : -cost;
+            profit += pl; pnls.push(pl);
           }
-          return { bets, wins, winRate: bets ? Number(((wins / bets) * 100).toFixed(2)) : null,
+          // Standard error of the ROI, so a result inside the noise is visible.
+          const se = bets > 1 ? Math.sqrt(pnls.reduce((s2, x) => s2 + (x - profit / bets) ** 2, 0) / (bets - 1)) / Math.sqrt(bets) : null;
+          return { spreadPts, bets, wins, winRate: bets ? Number(((wins / bets) * 100).toFixed(2)) : null,
             staked: Number(staked.toFixed(2)), fees: Number(fees.toFixed(2)),
             profit: Number(profit.toFixed(2)),
             roi: staked ? Number(((profit / staked) * 100).toFixed(2)) : null,
+            profitSE: se == null ? null : Number((se * bets).toFixed(2)),
+            tStat: se && se > 0 ? Number(((profit / bets) / se).toFixed(2)) : null,
             endingBankroll: Number((bankroll + profit).toFixed(2)) };
         };
-        return { gamesWithLine: used.length, kelly: run('kelly'), flat: run('flat') };
+        const steps = [0, 1, 2, 3, 4];
+        return { gamesWithLine: used.length,
+          kelly: steps.map((v) => run('kelly', v)),
+          flat: steps.map((v) => run('flat', v)) };
       })() : undefined,
 
       // ?pnl=1 simulates taking every FPI favourite with the desk's own staking.
