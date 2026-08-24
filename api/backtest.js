@@ -57,7 +57,8 @@ export default async function handler(req, res) {
     const extra = new URLSearchParams({ limit: '1000', ...L.query }).toString();
 
     const urls = year && weeks.length
-      ? weeks.map((w) => `${SITE}/${L.path}/scoreboard?year=${year}&seasontype=${seasonType}&week=${w}&${extra}`)
+      // ESPN takes the season year in `dates` when a week is supplied.
+      ? weeks.map((w) => `${SITE}/${L.path}/scoreboard?dates=${year}&seasontype=${seasonType}&week=${w}&${extra}`)
       : dateRange(start, end).map((d) => `${SITE}/${L.path}/scoreboard?dates=${d}&${extra}`);
 
     // 1. Completed games in the window
