@@ -45,6 +45,15 @@ async function loadJSON(url) {
 }
 
 async function loadData() {
+  // A standalone build inlines its data, so there is nothing to fetch.
+  if (window.__SCHEDULE_DATA__) {
+    const d = window.__SCHEDULE_DATA__;
+    return {
+      games: (d.leagues || []).flatMap((l) => l.games || []),
+      isDemo: Boolean(d.demo), warning: d.warning, timezone: d.timezone,
+      generatedAt: d.generatedAt,
+    };
+  }
   // Prefer a real pull; fall back to the demo fixture.
   try {
     const index = await loadJSON('../data/index.json');

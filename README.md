@@ -88,6 +88,17 @@ Static HTML, CSS and JavaScript - no build step, no dependencies.
 
 Press `/` to jump to the search box.
 
+### One-file build
+
+To share the app without a server, bundle it into a single HTML file with its
+data inlined:
+
+```bash
+node scripts/build-standalone.mjs                      # dist/sports-schedule.html
+node scripts/build-standalone.mjs --data data/index.json   # bundle a real pull
+node scripts/build-standalone.mjs --fragment           # for embedding hosts
+```
+
 ## Layout
 
 ```
@@ -96,6 +107,7 @@ scripts/normalize.mjs         ESPN event -> flat game record
 scripts/time.mjs              UTC -> Mountain time (MST/MDT aware)
 scripts/leagues.mjs           league paths and season windows
 scripts/serve.mjs             dependency-free static server
+scripts/build-standalone.mjs  bundles the app + data into one HTML file
 web/                          the app
 data/demo.json                labelled sample data (committed)
 data/<league>.json            real pulls (git-ignored)

@@ -5,3 +5,4 @@ node_modules/
 # The labelled demo fixture is committed so the app runs out of the box.
 data/*.json
 !data/demo.json
+dist/
