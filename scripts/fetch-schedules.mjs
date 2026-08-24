@@ -53,7 +53,9 @@ async function getJSON(url, attempt = 1) {
   const MAX = 4;
   try {
     const res = await fetch(url, {
-      headers: { 'User-Agent': 'sports-schedule/1.0', Accept: 'application/json' },
+      // No User-Agent override: ESPN's edge blocks custom agents from
+      // datacenter IPs, while the runtime default is accepted.
+      headers: { Accept: 'application/json' },
       signal: AbortSignal.timeout(30_000),
     });
     if (res.status === 404) return null;
