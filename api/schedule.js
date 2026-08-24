@@ -65,9 +65,12 @@ function slim(g) {
     weekday: g.weekday, sortKey: g.sortKey, timeTBD: g.timeTBD,
     startUTC: g.startUTC, networks: g.networks, national: g.national,
     week: g.week, neutralSite: g.neutralSite, notes: g.notes,
+    odds: g.odds, fair: g.fair,
     venue: g.venue,
-    home: { name: g.home.name, short: g.home.short, abbrev: g.home.abbrev, rank: g.home.rank },
-    away: { name: g.away.name, short: g.away.short, abbrev: g.away.abbrev, rank: g.away.rank },
+    home: { name: g.home.name, short: g.home.short, abbrev: g.home.abbrev,
+      location: g.home.location, rank: g.home.rank },
+    away: { name: g.away.name, short: g.away.short, abbrev: g.away.abbrev,
+      location: g.away.location, rank: g.away.rank },
   };
 }
 

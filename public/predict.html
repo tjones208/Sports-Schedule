@@ -1,0 +1,123 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Prediction Desk</title>
+<meta name="description" content="Kalshi sports prediction desk: market edges, position tracking and bankroll management in Mountain time.">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Barlow+Condensed:wght@500;600&family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans:wght@400;500;600&display=swap">
+<link rel="stylesheet" href="styles.css">
+</head>
+<body>
+
+<header class="masthead">
+  <div class="wrap masthead-inner">
+    <div class="wordmark">
+      <h1>Prediction Desk</h1>
+      <span class="sub">Kalshi sports markets &middot; Mountain time</span>
+    </div>
+    <nav class="sitenav">
+      <a href="index.html">Schedule board</a>
+      <a href="predict.html" aria-current="page">Prediction desk</a>
+    </nav>
+  </div>
+</header>
+
+<div class="bankbar">
+  <div class="wrap bank-inner" id="bankbar"></div>
+</div>
+
+<main class="wrap">
+  <div class="notice hidden" id="notice" role="status"></div>
+
+  <div class="controls">
+    <div class="leagues" id="tabs">
+      <button class="lg" data-tab="edges" aria-pressed="true">Edges</button>
+      <button class="lg" data-tab="positions" aria-pressed="false">Positions <span class="ct" id="posCount">0</span></button>
+      <button class="lg" data-tab="performance" aria-pressed="false">Performance</button>
+      <button class="lg" data-tab="settings" aria-pressed="false">Settings</button>
+    </div>
+  </div>
+
+  <!-- EDGES -->
+  <section id="panel-edges" class="panel">
+    <div class="filters">
+      <select id="edgeLeague" aria-label="League">
+        <option value="nfl">NFL</option>
+        <option value="ncaaf">College Football</option>
+        <option value="nba">NBA</option>
+        <option value="nhl">NHL</option>
+        <option value="ncaab">College Basketball</option>
+      </select>
+      <label class="toggle">Min edge
+        <input type="number" id="minEdge" min="0" max="50" step="0.5" value="3" style="width:58px">
+        <span>pts</span>
+      </label>
+      <label class="toggle"><input type="checkbox" id="onlyEdges" checked> Only +EV</label>
+      <span class="spacer"></span>
+      <button class="btn" id="refresh" type="button">Refresh markets</button>
+    </div>
+    <div id="edges"></div>
+  </section>
+
+  <!-- POSITIONS -->
+  <section id="panel-positions" class="panel" hidden>
+    <div class="filters">
+      <button class="btn" id="addManual" type="button">Log a position manually</button>
+      <label class="toggle"><input type="checkbox" id="showSettled"> Show settled</label>
+      <span class="spacer"></span>
+      <button class="btn" id="markAll" type="button">Refresh marks</button>
+    </div>
+    <div id="positions"></div>
+  </section>
+
+  <!-- PERFORMANCE -->
+  <section id="panel-performance" class="panel" hidden>
+    <div id="performance"></div>
+  </section>
+
+  <!-- SETTINGS -->
+  <section id="panel-settings" class="panel" hidden>
+    <div class="settings-grid" id="settings"></div>
+  </section>
+</main>
+
+<footer class="wrap">
+  <span>Positions are stored in this browser only &mdash; export regularly to keep a backup.</span>
+  <span id="deskGenerated"></span>
+</footer>
+
+<!-- Log-position dialog -->
+<dialog id="logDialog">
+  <form method="dialog" id="logForm">
+    <h3 id="logTitle">Log a position</h3>
+    <div class="dlg-grid">
+      <label>Market ticker<input name="ticker" required placeholder="KXNFLGAME-26SEP13CINTB-CIN"></label>
+      <label>Description<input name="title" placeholder="Bengals to beat Buccaneers"></label>
+      <label>League
+        <select name="league">
+          <option value="nfl">NFL</option><option value="ncaaf">College Football</option>
+          <option value="nba">NBA</option><option value="nhl">NHL</option>
+          <option value="ncaab">College Basketball</option><option value="other">Other</option>
+        </select>
+      </label>
+      <label>Side
+        <select name="side"><option value="YES">YES</option><option value="NO">NO</option></select>
+      </label>
+      <label>Contracts<input name="contracts" type="number" min="1" step="1" value="10" required></label>
+      <label>Entry price (cents)<input name="price" type="number" min="1" max="99" step="1" value="50" required></label>
+      <label class="dlg-wide">Note<input name="note" placeholder="why you took it"></label>
+    </div>
+    <p class="dlg-cost" id="dlgCost"></p>
+    <menu>
+      <button value="cancel" class="btn" type="submit" formnovalidate>Cancel</button>
+      <button value="save" class="btn primary" type="submit">Save position</button>
+    </menu>
+  </form>
+</dialog>
+
+<script src="predict.js"></script>
+</body>
+</html>

@@ -31,7 +31,13 @@ GET /api/schedule?league=nfl
 GET /api/schedule?league=ncaab&start=2026-11-01&end=2026-11-30
 GET /api/schedule?league=nhl&tz=mst          # strict UTC-7 instead of local Mountain
 GET /api/schedule?league=nfl&debug=1         # upstream request count and timing
+
+GET /api/kalshi?series=KXNFLGAME             # open events + market prices
+GET /api/kalshi?tickers=TICKER1,TICKER2      # prices for specific markets
 ```
+
+Schedule responses include `odds` (the sportsbook line) and `fair` (vig-free win
+probabilities) when ESPN has published a line for the game.
 
 | League | key | Season |
 | --- | --- | --- |
@@ -90,6 +96,38 @@ egress is restricted - use the deployed API in that case.
 node scripts/build-standalone.mjs      # dist/sports-schedule.html, data inlined
 node scripts/build-standalone.mjs --fragment
 ```
+
+## Prediction desk
+
+`/predict.html` is a Kalshi-oriented desk for tracking sports predictions against a
+bankroll. It is **read-only against Kalshi** - it never authenticates, never holds
+an API key, and never places an order. You trade on Kalshi yourself; this tracks it.
+
+**Edges** joins three sources per game: the ESPN schedule, the sportsbook line ESPN
+carries (DraftKings), and the open Kalshi market. It strips the vig from the book's
+two-way price to get a fair probability, compares that to the Kalshi ask, and sizes
+a stake with fractional Kelly.
+
+- Fair probability prefers the moneyline, falling back to a normal model of the
+  point spread when no moneyline is posted yet
+- Kalshi events are matched to games by the ticker's `AWAY+HOME` abbreviation pair
+  (`KXNFLGAME-26SEP13TBCIN`), with city names as a fallback
+- Stakes default to quarter Kelly, capped at 5% of bankroll per position
+
+**Positions** tracks what you took, marks it to the live Kalshi bid, and settles it
+won or lost. **Performance** reports record, ROI on stake, P&L by league, and a
+calibration table - whether contracts you bought near 60c actually won about 60% of
+the time.
+
+Everything is stored in your browser's localStorage. Nothing is sent to a server,
+which also means clearing site data loses it - export from Settings to keep a backup.
+
+### What it does not do
+
+It does not predict outcomes. The "edge" it shows is a disagreement between two
+markets, which is a starting point for research, not a signal. Kalshi charges
+trading fees that a small nominal edge will not cover, and the book line it compares
+against is itself an estimate. Size accordingly.
 
 ## A note on "MST"
 
