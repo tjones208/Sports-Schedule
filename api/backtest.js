@@ -12,6 +12,7 @@ import { LEAGUES } from '../lib/leagues.mjs';
 import { dateRange } from '../lib/time.mjs';
 import { getFbsTeamIds, isFbsMatchup } from '../lib/divisions.mjs';
 import { extractOdds, fairProbabilityConsensus } from '../lib/odds.mjs';
+import { kellyNet, orderFeeDollars } from '../lib/fees.mjs';
 
 const SITE = 'https://site.api.espn.com/apis/site/v2/sports';
 // ESPN silently falls back to 25 events when limit exceeds ~500, so a bigger
@@ -250,6 +251,60 @@ export default async function handler(req, res) {
         projectionsOver95: rows.filter((r) => Math.max(r.fpiHome, 1 - r.fpiHome) > 0.95).length,
         shareOver95: Number(((rows.filter((r) => Math.max(r.fpiHome, 1 - r.fpiHome) > 0.95).length / rows.length) * 100).toFixed(1)),
       },
+      // ?pnl=1 simulates taking every FPI favourite with the desk's own staking.
+      //
+      // Kalshi does not retain last season's markets, so there is no real entry
+      // price to use. The price is therefore modelled as FPI's own probability
+      // shifted by delta points: delta 0 means the market agreed with FPI
+      // exactly (no edge, so Kelly stakes nothing), negative delta means the
+      // market was cheaper than FPI thought, i.e. you had an edge.
+      pnl: q.pnl === '1' ? (() => {
+        const bankroll = Number(q.bankroll) || 5000;
+        const frac = Number(q.kelly) || 0.25;
+        const cap = Number(q.maxStake) || 0.05;
+        const flat = Number(q.flat) || 25;
+        const deltas = [-8, -6, -5, -4, -3, -2, -1, 0, 1, 2];
+
+        const run = (delta, mode) => {
+          let staked = 0, fees = 0, profit = 0, bets = 0, wins = 0, contractsTotal = 0;
+          for (const r of rows) {
+            const p = Math.max(r.fpiHome, 1 - r.fpiHome);
+            const won = ((r.fpiHome >= 0.5) === r.homeWon);
+            const ask = Math.min(99, Math.max(1, (p * 100) + delta));
+            let stake;
+            if (mode === 'flat') {
+              stake = flat;
+            } else {
+              const k = kellyNet(p, ask, frac, 'taker');
+              if (!k) continue;
+              stake = Math.min(k.staked, cap) * bankroll;
+            }
+            const contracts = Math.floor(stake / (ask / 100));
+            if (contracts < 1) continue;
+            const fee = orderFeeDollars(contracts, ask, 'taker');
+            const cost = contracts * (ask / 100) + fee;
+            bets++; wins += won ? 1 : 0; staked += cost; fees += fee; contractsTotal += contracts;
+            profit += won ? contracts - cost : -cost;
+          }
+          return {
+            delta, bets, wins,
+            winRate: bets ? Number(((wins / bets) * 100).toFixed(2)) : null,
+            staked: Number(staked.toFixed(2)),
+            fees: Number(fees.toFixed(2)),
+            profit: Number(profit.toFixed(2)),
+            roi: staked ? Number(((profit / staked) * 100).toFixed(2)) : null,
+            endingBankroll: Number((bankroll + profit).toFixed(2)),
+          };
+        };
+
+        return {
+          note: 'price modelled as FPI probability + delta points; no historical Kalshi prices exist',
+          bankroll, kellyFraction: frac, maxStakePct: cap, flatStake: flat,
+          kelly: deltas.map((d) => run(d, 'kelly')),
+          flat: deltas.map((d) => run(d, 'flat')),
+        };
+      })() : undefined,
+
       // ?raw=1 returns the per-game (favourite probability, did it win) pairs so
       // a P&L can be simulated against an assumed price. Kalshi does not retain
       // last season's markets, so the price has to be a stated assumption.
