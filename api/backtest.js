@@ -516,6 +516,15 @@ export default async function handler(req, res) {
         // How the result moves as Kalshi prices below FPI, in probability points.
         discountSweep: payload.pnl && (payload.pnl.fixed || []).map((x) => ({
           discountPts: -x.delta, profit: x.profit, roi: x.roi, tStat: x.tStat })),
+        // Per-band result at zero discount. Since one point of discount is worth
+        // exactly $1 per game per 100 contracts, -profit/games is very nearly the
+        // discount that band needed to break even.
+        byBand: payload.pnl && (payload.pnl.byBand || []).filter((b) => b.games > 0).map((b) => ({
+          band: b.band, games: b.games, wins: b.wins, expectedWins: b.expectedWins,
+          fees: b.fees, profit: b.profit,
+          discountNeededPts: b.games ? Number((-b.profit / b.games).toFixed(2)) : null,
+          feeInPts: b.games ? Number((b.fees / b.games).toFixed(2)) : null,
+        })),
         lines: payload.lines && { matchRate: payload.lines.matchRate, priced: payload.lines.priced },
       });
       return;
