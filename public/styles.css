@@ -424,3 +424,6 @@ dialog menu { display: flex; gap: 8px; justify-content: flex-end; padding: 14px 
   .dlg-grid { grid-template-columns: 1fr; }
   .sitenav { width: 100%; }
 }
+
+.pending { color: var(--ink-faint); font-family: var(--sans); font-size: 11.5px; font-style: italic; }
+.btn.sm[disabled] { opacity: 0.4; cursor: not-allowed; }

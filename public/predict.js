@@ -155,15 +155,25 @@ function buildRows() {
     ]) {
       const mkt = marketForTeam(ev, team);
       if (!mkt) continue;
-      const ask = mkt.yesAsk ?? (mkt.last != null ? mkt.last : null);
-      if (ask == null || ask <= 0 || ask >= 100) continue;
+
+      const ask = mkt.yesAsk ?? mkt.last ?? null;
+      const quoted = ask != null && ask > 0 && ask < 100;
+
+      // Kalshi lists game markets well before it opens an order book on them,
+      // so an unquoted market is normal - keep the row and mark it pending.
+      if (!quoted) {
+        rows.push({ game, ev, mkt, side, team, fair: fairP, quoted: false,
+          ask: null, edge: null, ev: null, stakeDollars: 0, contracts: 0,
+          source: game.fair.source });
+        continue;
+      }
 
       const k = kelly(fairP, ask, state.kellyFraction);
       if (!k) continue;
       const capped = Math.min(k.staked, state.maxStakePct);
       const stakeDollars = capped * state.bankroll;
       rows.push({
-        game, ev, mkt, side, team,
+        game, ev, mkt, side, team, quoted: true,
         fair: fairP, ask,
         edge: fairP - ask / 100,
         ev: evCents(fairP, ask),
@@ -174,7 +184,7 @@ function buildRows() {
       });
     }
   }
-  return rows.sort((a, b) => b.edge - a.edge);
+  return rows.sort((a, b) => (b.edge ?? -1) - (a.edge ?? -1));
 }
 
 /* ---------- bankroll ---------- */
@@ -250,14 +260,16 @@ function renderEdges() {
   const onlyEdges = document.getElementById('onlyEdges').checked;
 
   let rows = matched;
-  if (onlyEdges) rows = rows.filter((r) => r.edge >= minEdge && r.ev > 0);
+  if (onlyEdges) rows = rows.filter((r) => r.quoted && r.edge >= minEdge && r.ev > 0);
 
   if (!rows.length) {
     el.innerHTML = `<div class="empty">
       <h3>No qualifying edges</h3>
       <p>${matched.length
-        ? `${matched.length} market${matched.length === 1 ? '' : 's'} matched, but none clear a ${state.minEdgePts}-point edge. Lower the threshold or untick <em>Only +EV</em> to see them all.`
-        : 'No Kalshi markets are open yet for this league that line up with a game that has a posted betting line. Kalshi lists most game markets in the days before kickoff.'}</p>
+        ? (matched.some((r) => r.quoted)
+          ? `${matched.length} market${matched.length === 1 ? '' : 's'} matched, but none clear a ${state.minEdgePts}-point edge. Lower the threshold or untick <em>Only +EV</em> to see them all.`
+          : `${matched.length} markets matched their games, but Kalshi has not opened an order book on any of them yet, so there is no price to compare against. Untick <em>Only +EV</em> to see the matched slate. Quotes usually appear in the days before kickoff.`)
+        : 'No Kalshi markets line up with a game that has a posted betting line yet.'}</p>
     </div>`;
     return;
   }
@@ -269,7 +281,7 @@ function renderEdges() {
     </tr></thead><tbody>
     ${rows.map((r, i) => {
       const g = r.game;
-      const good = r.edge >= minEdge && r.ev > 0;
+      const good = r.quoted && r.edge >= minEdge && r.ev > 0;
       return `<tr class="${good ? 'good' : ''}">
         <td>
           <div class="g-teams">${esc(g.away.short || g.away.name)} at ${esc(g.home.short || g.home.name)}</div>
@@ -279,11 +291,13 @@ function renderEdges() {
         <td><strong>${esc(r.team.short || r.team.name)}</strong>
           <div class="g-meta">${r.source === 'spread' ? 'from spread' : 'from moneyline'}</div></td>
         <td class="r mono">${pct(r.fair, 1)}</td>
-        <td class="r mono">${r.ask}&cent;</td>
-        <td class="r mono ${r.edge > 0 ? 'up' : 'down'}">${pts(r.edge)}</td>
-        <td class="r mono ${r.ev > 0 ? 'up' : 'down'}">${r.ev.toFixed(1)}&cent;</td>
-        <td class="r mono">${money(r.stakeDollars)}<div class="g-meta">${r.contracts} contracts</div></td>
-        <td class="r"><button class="btn sm" data-log="${i}">Log</button></td>
+        <td class="r mono">${r.quoted ? `${r.ask}&cent;` : '<span class="pending">no book</span>'}</td>
+        <td class="r mono ${!r.quoted ? '' : r.edge > 0 ? 'up' : 'down'}">${r.quoted ? pts(r.edge) : '--'}</td>
+        <td class="r mono ${!r.quoted ? '' : r.ev > 0 ? 'up' : 'down'}">${r.quoted ? `${r.ev.toFixed(1)}&cent;` : '--'}</td>
+        <td class="r mono">${r.quoted
+          ? `${money(r.stakeDollars)}<div class="g-meta">${r.contracts} contracts</div>`
+          : '--'}</td>
+        <td class="r"><button class="btn sm" data-log="${i}"${r.quoted ? '' : ' disabled'}>Log</button></td>
       </tr>`;
     }).join('')}
   </tbody></table></div>
@@ -583,7 +597,8 @@ async function loadLeague(league) {
 
   const withLine = games.filter((g) => g.fair).length;
   document.getElementById('deskGenerated').textContent =
-    `${games.length} games · ${withLine} with a line · ${kalshiEvents.length} Kalshi events · ${matched.length} matched`;
+    `${games.length} games · ${withLine} with a line · ${kalshiEvents.length} Kalshi events · `
+    + `${matched.length} matched · ${matched.filter((r) => r.quoted).length} quoted`;
 }
 
 async function refreshMarks() {

@@ -114,6 +114,12 @@ a stake with fractional Kelly.
   (`KXNFLGAME-26SEP13TBCIN`), with city names as a fallback
 - Stakes default to quarter Kelly, capped at 5% of bankroll per position
 
+Kalshi lists game markets well before it opens an order book on them. Until then
+a market has no bid or ask, so those rows show as *no book* with the sportsbook
+probability still visible and the Log button disabled - the join is working, there
+is just nothing to price against yet. Quotes typically appear in the days before
+kickoff.
+
 **Positions** tracks what you took, marks it to the live Kalshi bid, and settles it
 won or lost. **Performance** reports record, ROI on stake, P&L by league, and a
 calibration table - whether contracts you bought near 60c actually won about 60% of
