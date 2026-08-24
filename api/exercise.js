@@ -12,6 +12,7 @@
 import { LEAGUES } from '../lib/leagues.mjs';
 import { normalizeEvent } from '../lib/normalize.mjs';
 import { kellyNet, orderFeeDollars, feePerContractCents, breakevenProbability } from '../lib/fees.mjs';
+import { getFbsTeamIds, isFbsMatchup } from '../lib/divisions.mjs';
 
 const SITE = 'https://site.api.espn.com/apis/site/v2/sports';
 const CORE = 'https://sports.core.api.espn.com/v2/sports';
@@ -70,7 +71,11 @@ export default async function handler(req, res) {
     // ESPN games that day
     const extra = new URLSearchParams({ limit: '1000', ...L.query }).toString();
     const sj = await J(`${SITE}/${L.path}/scoreboard?dates=${date.replace(/-/g, '')}&${extra}`);
-    const games = (sj.events || []).map((ev) => normalizeEvent(ev, L, 'denver')).filter(Boolean);
+    const fbsOnly = league === 'ncaaf' && q.fbs !== '0';
+    const fbsIds = fbsOnly ? await getFbsTeamIds() : null;
+    const games = (sj.events || [])
+      .filter((ev) => !fbsOnly || isFbsMatchup(ev.competitions?.[0], fbsIds))
+      .map((ev) => normalizeEvent(ev, L, 'denver')).filter(Boolean);
 
     // FPI for every game that day
     const ids = games.map((g) => String(g.id).replace(/^[a-z]+-/, ''));
@@ -182,6 +187,7 @@ export default async function handler(req, res) {
     res.setHeader('Cache-Control', 'public, s-maxage=300');
     res.status(200).json({
       league, date, strategy: 'ESPN FPI favourite in every game',
+      fbsOnly: league === 'ncaaf' && q.fbs !== '0',
       settings: { bankroll, kellyFraction: frac, maxStakePct: maxStake, flatStake: flat, role },
       gamesOnDate: games.length,
       kalshiEventsOnDate: events.length,

@@ -7,6 +7,7 @@
 import { LEAGUES } from '../lib/leagues.mjs';
 import { normalizeEvent } from '../lib/normalize.mjs';
 import { fairProbabilityConsensus, extractOdds, fairProbabilities, DEVIG_METHODS } from '../lib/odds.mjs';
+import { getFbsTeamIds, isFbsMatchup } from '../lib/divisions.mjs';
 import { dateRange } from '../lib/time.mjs';
 import { kellyNet, netEdge, netExpectedValue, orderFeeDollars, breakevenProbability } from '../lib/fees.mjs';
 
@@ -64,7 +65,13 @@ export default async function handler(req, res) {
     ? q.method : 'consensus';
   const normMethod = method === 'consensus' ? 'multiplicative' : method;
 
+  const fbsOnly = league === 'ncaaf' && q.fbs !== '0';
+  // One row per game by default: both sides of the same market are never both
+  // worth taking, so listing them twice just doubles the table.
+  const sides = q.sides === 'both' ? 'both' : 'best';
+
   try {
+    const fbsIds = fbsOnly ? await getFbsTeamIds() : null;
     // 1. Kalshi open markets for this league
     const kj = await J(`${KB}/events?series_ticker=${SERIES[league]}&status=open&limit=200&with_nested_markets=true`);
     const events = (kj.events || []).map((e) => ({
@@ -91,6 +98,7 @@ export default async function handler(req, res) {
       try {
         const j = await J(`${SITE}/${L.path}/scoreboard?dates=${d.replace(/-/g, '')}&${extra}`);
         for (const ev of j.events || []) {
+          if (fbsOnly && !isFbsMatchup(ev.competitions?.[0], fbsIds)) continue;
           const g = normalizeEvent(ev, L, 'denver', normMethod);
           if (g) g._odds = extractOdds(ev.competitions?.[0]);
           if (g && method === 'consensus') {
@@ -147,7 +155,7 @@ export default async function handler(req, res) {
     }
 
     // 5. Size
-    const picks = rows.map((r) => {
+    let picks = rows.map((r) => {
       const id = String(r.game.id).replace(/^[a-z]+-/, '');
       const f = fpi.get(id);
       const fpiP = f ? (r.side === 'home' ? f.home : f.away) : null;
@@ -197,6 +205,17 @@ export default async function handler(req, res) {
       };
     }).filter(Boolean).sort((a, b) => b.netEdgePts - a.netEdgePts);
 
+    if (sides === 'best') {
+      // Keep only the better side of each game (rows are already edge-sorted).
+      const seen = new Set();
+      picks = picks.filter((x) => {
+        const key = `${x.game}|${x.date}`;
+        if (seen.has(key)) return false;
+        seen.add(key);
+        return true;
+      });
+    }
+
     // ?q= narrows to one matchup, for explaining a single pick.
     const needle = String(q.q || '').trim().toLowerCase();
     const searched = needle
@@ -212,7 +231,7 @@ export default async function handler(req, res) {
     res.setHeader('Cache-Control', 'public, s-maxage=120, stale-while-revalidate=600');
     res.status(200).json({
       league, tradeable: true, generatedAt: new Date().toISOString(),
-      settings: { bankroll, kellyFraction: frac, maxStakePct: maxStake, fpiWeight: fpiW, role, devig: method },
+      settings: { bankroll, kellyFraction: frac, maxStakePct: maxStake, fpiWeight: fpiW, role, devig: method, fbsOnly, sides },
       // Edge grouped by what the contract costs. A method that is fair across
       // the price range should look flat here; a slope means the devig is
       // manufacturing edge at one end of the book.

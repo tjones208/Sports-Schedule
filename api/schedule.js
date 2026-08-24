@@ -6,6 +6,7 @@
 
 import { LEAGUES, LEAGUE_IDS } from '../lib/leagues.mjs';
 import { normalizeEvent } from '../lib/normalize.mjs';
+import { getFbsTeamIds, isFbsMatchup } from '../lib/divisions.mjs';
 import { dateRange } from '../lib/time.mjs';
 
 const BASE = 'https://site.api.espn.com/apis/site/v2/sports';
@@ -91,6 +92,9 @@ export default async function handler(req, res) {
   }
 
   const tzMode = tz === 'mst' ? 'mst' : 'denver';
+  // College football only: drop games against FCS opponents unless asked not to.
+  const fbsOnly = league.id === 'ncaaf' && req.query.fbs !== '0';
+  const fbsIds = fbsOnly ? await getFbsTeamIds() : null;
   const extra = new URLSearchParams({ limit: '1000', ...league.query }).toString();
   const started = Date.now();
   const games = new Map();

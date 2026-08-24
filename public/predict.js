@@ -18,6 +18,7 @@ const DEFAULTS = {
   feeRole: 'taker',      // you are usually crossing the spread to hit an ask
   fpiWeight: 0.35,       // how much the ESPN model counts in the blend
   sortBy: 'edge',        // edge | date | stake | price
+  bothSides: false,      // one row per game unless asked for both
   positions: [],
 };
 
@@ -257,7 +258,19 @@ function buildRows() {
       });
     }
   }
-  return rows.sort((a, b) => (b.edge ?? -1) - (a.edge ?? -1));
+  rows.sort((a, b) => (b.edge ?? -1) - (a.edge ?? -1));
+
+  if (!state.bothSides) {
+    // Both sides of a market can never both be worth taking, so show only the
+    // better one. Rows are edge-sorted, so the first hit per game is the pick.
+    const seen = new Set();
+    return rows.filter((r) => {
+      if (seen.has(r.game.id)) return false;
+      seen.add(r.game.id);
+      return true;
+    });
+  }
+  return rows;
 }
 
 /* ---------- bankroll ---------- */
@@ -742,7 +755,8 @@ async function loadLeague(league) {
   const withLine = games.filter((g) => g.fair).length;
   document.getElementById('deskGenerated').textContent =
     `${games.length} games · ${withLine} with a line · ${kalshiEvents.length} Kalshi events · `
-    + `${matched.length} matched · ${matched.filter((r) => r.quoted).length} quoted · `
+    + `${matched.length} ${state.bothSides ? 'sides' : 'games'} matched · `
+    + `${matched.filter((r) => r.quoted).length} quoted · `
     + `${fpiCache.size} with an ESPN projection`;
 }
 
@@ -785,6 +799,9 @@ document.getElementById('minEdge').addEventListener('change', (e) => {
   state.minEdgePts = Number(e.target.value) || 0; save(); renderEdges();
 });
 document.getElementById('onlyEdges').addEventListener('change', renderEdges);
+document.getElementById('bothSides').addEventListener('change', (e) => {
+  state.bothSides = e.target.checked; save(); refreshDerived();
+});
 document.getElementById('edgeFrom').addEventListener('change', (e) => { dateFrom = e.target.value; renderEdges(); });
 document.getElementById('edgeTo').addEventListener('change', (e) => { dateTo = e.target.value; renderEdges(); });
 document.getElementById('edgeSort').addEventListener('change', (e) => {
@@ -812,6 +829,7 @@ document.getElementById('markAll').addEventListener('click', refreshMarks);
 
 document.getElementById('minEdge').value = state.minEdgePts;
 document.getElementById('edgeSort').value = state.sortBy;
+document.getElementById('bothSides').checked = state.bothSides;
 renderBank();
 renderPositions();
 showTab('edges');
