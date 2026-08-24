@@ -56,39 +56,85 @@ export default async function handler(req, res) {
     const fbsIds = fbsOnly ? await getFbsTeamIds(year || String(start).slice(0, 4)) : null;
     const extra = new URLSearchParams({ limit: '1000', ...L.query }).toString();
 
-    const urls = year && weeks.length
-      // ESPN takes the season year in `dates` when a week is supplied.
-      ? weeks.map((w) => `${SITE}/${L.path}/scoreboard?dates=${year}&seasontype=${seasonType}&week=${w}&${extra}`)
-      : dateRange(start, end).map((d) => `${SITE}/${L.path}/scoreboard?dates=${d}&${extra}`);
-
-    // 1. Completed games in the window
+    // 1. Completed games.
+    //
+    // The site scoreboard silently caps at 25 events per request no matter what
+    // `limit` says, which quietly turns a season backtest into a sample of
+    // whichever games ESPN lists first. The core API's week events collection
+    // paginates properly, so week mode walks that instead and pulls each game's
+    // detail individually.
     const raw = [];
     let completedAll = 0;
     const seenIds = new Set();
-    await pool(urls, 14, async (url) => {
-      try {
-        const j = await J(url);
-        for (const ev of j.events || []) {
-          const c = ev.competitions?.[0];
-          if (!c?.status?.type?.completed) continue;
-          if (seenIds.has(ev.id)) continue;   // weeks can overlap at the edges
-          seenIds.add(ev.id);
-          completedAll++;
-          if (fbsOnly && !isFbsMatchup(c, fbsIds)) continue;
-          const home = c.competitors?.find((x) => x.homeAway === 'home');
-          const away = c.competitors?.find((x) => x.homeAway === 'away');
-          if (!home || !away) continue;
-          const hs = Number(home.score), as = Number(away.score);
-          if (!Number.isFinite(hs) || !Number.isFinite(as) || hs === as) continue;  // ties are undefined here
-          raw.push({
-            id: ev.id, date: ev.date?.slice(0, 10),
-            home: home.team?.abbreviation, away: away.team?.abbreviation,
-            hs, as, homeWon: hs > as,
-            odds: extractOdds(c),
-          });
+
+    async function collectEvent(id) {
+      const sum = await J(`${SITE}/${L.path}/summary?event=${id}`);
+      const c = sum?.header?.competitions?.[0];
+      if (!c?.status?.type?.completed) return;
+      if (seenIds.has(String(id))) return;
+      seenIds.add(String(id));
+      completedAll++;
+      if (fbsOnly && !isFbsMatchup(c, fbsIds)) return;
+      const home = c.competitors?.find((x) => x.homeAway === 'home');
+      const away = c.competitors?.find((x) => x.homeAway === 'away');
+      if (!home || !away) return;
+      const hs = Number(home.score), as = Number(away.score);
+      if (!Number.isFinite(hs) || !Number.isFinite(as) || hs === as) return;
+      raw.push({
+        id: String(id), date: (sum?.header?.competitions?.[0]?.date || '').slice(0, 10),
+        home: home.team?.abbreviation, away: away.team?.abbreviation,
+        hs, as, homeWon: hs > as, odds: null,
+      });
+    }
+
+    let requests = 0;
+    if (year && weeks.length) {
+      const ids = [];
+      await pool(weeks, 6, async (w) => {
+        let page = 1, pageCount = 1;
+        while (page <= pageCount && page <= 10) {
+          try {
+            requests++;
+            const j = await J(`${CORE}/${CORE_PATH[league]}/seasons/${year}/types/${seasonType}/weeks/${w}/events?limit=100&page=${page}`);
+            pageCount = j?.pageCount || 1;
+            for (const it of j?.items || []) {
+              const m = /\/events\/(\d+)/.exec(it?.$ref || '');
+              if (m) ids.push(m[1]);
+            }
+          } catch { break; }
+          page++;
         }
-      } catch { /* skip the day */ }
-    });
+      });
+      requests += ids.length;
+      await pool([...new Set(ids)], 14, async (id) => {
+        try { await collectEvent(id); } catch { /* skip */ }
+      });
+    } else {
+      const extra2 = new URLSearchParams({ limit: '1000', ...L.query }).toString();
+      const days = dateRange(start, end);
+      requests = days.length;
+      await pool(days, 14, async (d) => {
+        try {
+          const j = await J(`${SITE}/${L.path}/scoreboard?dates=${d}&${extra2}`);
+          for (const ev of j.events || []) {
+            const c = ev.competitions?.[0];
+            if (!c?.status?.type?.completed) continue;
+            if (seenIds.has(ev.id)) continue;
+            seenIds.add(ev.id);
+            completedAll++;
+            if (fbsOnly && !isFbsMatchup(c, fbsIds)) continue;
+            const home = c.competitors?.find((x) => x.homeAway === 'home');
+            const away = c.competitors?.find((x) => x.homeAway === 'away');
+            if (!home || !away) continue;
+            const hs = Number(home.score), as = Number(away.score);
+            if (!Number.isFinite(hs) || !Number.isFinite(as) || hs === as) continue;
+            raw.push({ id: ev.id, date: ev.date?.slice(0, 10),
+              home: home.team?.abbreviation, away: away.team?.abbreviation,
+              hs, as, homeWon: hs > as, odds: extractOdds(c) });
+          }
+        } catch { /* skip the day */ }
+      });
+    }
 
     // 2. FPI projection per game
     const rows = [];
@@ -158,7 +204,7 @@ export default async function handler(req, res) {
     res.setHeader('Cache-Control', 'public, s-maxage=86400');
     res.status(200).json({
       league, start, end, year, weeks, fbsOnly,
-      requests: urls.length,
+      requests,
       // Completed games found vs those ESPN still has a projection for. A big
       // gap would mean the sample is not the season, just the part ESPN kept.
       completedGamesOnScoreboard: completedAll,
