@@ -94,7 +94,7 @@ export default async function handler(req, res) {
   const tzMode = tz === 'mst' ? 'mst' : 'denver';
   // College football only: drop games against FCS opponents unless asked not to.
   const fbsOnly = league.id === 'ncaaf' && req.query.fbs !== '0';
-  const fbsIds = fbsOnly ? await getFbsTeamIds() : null;
+  const fbsIds = fbsOnly ? await getFbsTeamIds(league.season) : null;
   const extra = new URLSearchParams({ limit: '1000', ...league.query }).toString();
   const started = Date.now();
   const games = new Map();

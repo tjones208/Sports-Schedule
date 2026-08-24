@@ -72,7 +72,7 @@ export default async function handler(req, res) {
     const extra = new URLSearchParams({ limit: '1000', ...L.query }).toString();
     const sj = await J(`${SITE}/${L.path}/scoreboard?dates=${date.replace(/-/g, '')}&${extra}`);
     const fbsOnly = league === 'ncaaf' && q.fbs !== '0';
-    const fbsIds = fbsOnly ? await getFbsTeamIds() : null;
+    const fbsIds = fbsOnly ? await getFbsTeamIds(L.season) : null;
     const games = (sj.events || [])
       .filter((ev) => !fbsOnly || isFbsMatchup(ev.competitions?.[0], fbsIds))
       .map((ev) => normalizeEvent(ev, L, 'denver')).filter(Boolean);

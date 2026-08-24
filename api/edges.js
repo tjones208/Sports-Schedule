@@ -71,7 +71,7 @@ export default async function handler(req, res) {
   const sides = q.sides === 'both' ? 'both' : 'best';
 
   try {
-    const fbsIds = fbsOnly ? await getFbsTeamIds() : null;
+    const fbsIds = fbsOnly ? await getFbsTeamIds(L.season) : null;
     // 1. Kalshi open markets for this league
     const kj = await J(`${KB}/events?series_ticker=${SERIES[league]}&status=open&limit=200&with_nested_markets=true`);
     const events = (kj.events || []).map((e) => ({
