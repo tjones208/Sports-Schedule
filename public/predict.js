@@ -66,6 +66,8 @@ const money = (n) => (n < 0 ? '-' : '') + '$' + Math.abs(n).toLocaleString('en-U
   { minimumFractionDigits: 2, maximumFractionDigits: 2 });
 const pct = (n, d = 1) => `${(n * 100).toFixed(d)}%`;
 const pts = (n) => `${n >= 0 ? '+' : ''}${(n * 100).toFixed(1)}`;
+const cents = (c) => (c == null ? '--'
+  : `${Number.isInteger(Number(c)) ? c : Number(c).toFixed(1)}\u00A2`);
 const uid = () => `p${Date.now().toString(36)}${Math.floor(Math.random() * 1e6).toString(36)}`;
 
 function toast(msg) {
@@ -353,27 +355,27 @@ function renderEdges() {
       const g = r.game;
       const good = r.quoted && r.edge >= minEdge && r.netEv > 0;
       return `<tr class="${good ? 'good' : ''}">
-        <td>
+        <td data-label="Game">
           <div class="g-teams">${esc(g.away.short || g.away.name)} at ${esc(g.home.short || g.home.name)}</div>
           <div class="g-meta">${esc(g.weekday)} ${esc(g.date)} &middot; ${esc(g.time)} ${esc(g.tz)}
             ${g.networks?.length ? `&middot; ${esc(g.networks.join(', '))}` : ''}${restNote(g)}</div>
         </td>
-        <td><strong>${esc(r.team.short || r.team.name)}</strong>
+        <td data-label="Pick"><strong>${esc(r.team.short || r.team.name)}</strong>
           <div class="g-meta">${r.source === 'spread' ? 'from spread' : 'from moneyline'}</div>
           ${r.disagree != null && r.disagree >= 0.08
             ? `<div class="g-meta"><span class="warnchip">models differ ${pts(r.disagree)}</span></div>` : ''}</td>
-        <td class="r mono">${pct(r.fair, 1)}</td>
-        <td class="r mono">${r.fpi == null ? '<span class="pending">--</span>' : pct(r.fpi, 1)}</td>
-        <td class="r mono"><strong>${pct(r.blend, 1)}</strong></td>
-        <td class="r mono">${r.quoted ? `${r.ask}&cent;` : '<span class="pending">no book</span>'}</td>
-        <td class="r mono ${!r.quoted ? '' : r.edge > 0 ? 'up' : 'down'}">${
+        <td class="r mono" data-label="Book">${pct(r.fair, 1)}</td>
+        <td class="r mono" data-label="ESPN FPI">${r.fpi == null ? '<span class="pending">--</span>' : pct(r.fpi, 1)}</td>
+        <td class="r mono" data-label="Blend"><strong>${pct(r.blend, 1)}</strong></td>
+        <td class="r mono" data-label="Kalshi ask">${r.quoted ? cents(r.ask) : '<span class="pending">no book</span>'}</td>
+        <td class="r mono" data-label="Net edge" data-tone="${!r.quoted ? '' : r.edge > 0 ? 'up' : 'down'}">${
           r.quoted ? `${pts(r.edge)}<div class="g-meta">${pts(r.grossEdge)} gross</div>` : '--'}</td>
-        <td class="r mono ${!r.quoted ? '' : r.netEv > 0 ? 'up' : 'down'}">${
+        <td class="r mono" data-label="Net EV" data-tone="${!r.quoted ? '' : r.netEv > 0 ? 'up' : 'down'}">${
           r.quoted ? `${r.netEv.toFixed(1)}&cent;` : '--'}</td>
-        <td class="r mono">${r.quoted
-          ? `${money(r.stakeDollars)}<div class="g-meta">${r.contracts} @ ${r.ask}&cent; &middot; ${money(r.fee)} fee</div>`
+        <td class="r mono" data-label="Stake">${r.quoted
+          ? `${money(r.stakeDollars)}<div class="g-meta">${r.contracts} @ ${cents(r.ask)} &middot; ${money(r.fee)} fee</div>`
           : '--'}</td>
-        <td class="r"><button class="btn sm" data-log="${i}"${r.quoted ? '' : ' disabled'}>Log</button></td>
+        <td class="r act"><button class="btn sm" data-log="${i}"${r.quoted ? '' : ' disabled'}>Log</button></td>
       </tr>`;
     }).join('')}
   </tbody></table></div>
@@ -419,17 +421,17 @@ function renderPositions() {
       const pl = positionPnl(p, mark);
       const cost = positionCost(p);
       return `<tr>
-        <td><div class="g-teams">${esc(p.title || p.marketTicker)}</div>
+        <td data-label="Position"><div class="g-teams">${esc(p.title || p.marketTicker)}</div>
           <div class="g-meta mono">${esc(p.marketTicker)}</div>
           ${p.note ? `<div class="g-meta">${esc(p.note)}</div>` : ''}</td>
-        <td class="r"><span class="side ${p.side.toLowerCase()}">${p.side}</span></td>
-        <td class="r mono">${p.contracts}</td>
-        <td class="r mono">${p.entryPrice}&cent;</td>
-        <td class="r mono">${mark != null ? mark + '&cent;' : '--'}</td>
-        <td class="r mono">${money(cost)}</td>
-        <td class="r mono ${pl == null ? '' : pl > 0 ? 'up' : pl < 0 ? 'down' : ''}">${pl == null ? '--' : money(pl)}</td>
-        <td><span class="status ${p.status}">${p.status}</span></td>
-        <td class="r nowrap">${p.status === 'open' ? `
+        <td class="r" data-label="Side"><span class="side ${p.side.toLowerCase()}">${p.side}</span></td>
+        <td class="r mono" data-label="Qty">${p.contracts}</td>
+        <td class="r mono" data-label="Entry">${cents(p.entryPrice)}</td>
+        <td class="r mono" data-label="Mark">${mark != null ? cents(mark) : '--'}</td>
+        <td class="r mono" data-label="Cost">${money(cost)}</td>
+        <td class="r mono" data-label="P&amp;L" data-tone="${pl == null ? '' : pl > 0 ? 'up' : pl < 0 ? 'down' : ''}">${pl == null ? '--' : money(pl)}</td>
+        <td data-label="Status"><span class="status ${p.status}">${p.status}</span></td>
+        <td class="r nowrap act">${p.status === 'open' ? `
           <button class="btn sm" data-win="${p.id}">Won</button>
           <button class="btn sm" data-lose="${p.id}">Lost</button>` : ''}
           <button class="btn sm danger" data-del="${p.id}">&times;</button></td>
@@ -515,7 +517,7 @@ function renderPerformance() {
   <div class="tablewrap"><table class="tbl">
     <thead><tr><th>Entry price</th><th class="r">Positions</th><th class="r">Implied</th><th class="r">Actual</th><th class="r">Gap</th></tr></thead>
     <tbody>${cal.map((b) => `<tr>
-      <td class="mono">${b.lo}-${b.hi}&cent;</td>
+      <td class="mono" data-label="Entry price">${b.lo}-${b.hi}&cent;</td>
       <td class="r mono">${b.n}</td>
       <td class="r mono">${pct(b.implied, 0)}</td>
       <td class="r mono">${b.actual == null ? '--' : pct(b.actual, 0)}</td>
@@ -623,9 +625,9 @@ function openLog(row) {
       (row.side === 'home' ? row.game.away : row.game.home).short || ''}`.trim();
     f.league.value = row.game.league;
     f.side.value = 'YES';
-    f.price.value = row.ask;
+    f.price.value = Number(row.ask).toFixed(1);
     f.contracts.value = Math.max(1, row.contracts);
-    f.note.value = `${pts(row.edge)} pts net edge (blend ${pct(row.blend, 1)} vs ${row.ask}c)`;
+    f.note.value = `${pts(row.edge)} pts net edge (blend ${pct(row.blend, 1)} vs ${cents(row.ask)})`;
   } else {
     document.getElementById('logTitle').textContent = 'Log a position manually';
     f.reset();

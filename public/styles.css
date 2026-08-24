@@ -438,3 +438,96 @@ dialog menu { display: flex; gap: 8px; justify-content: flex-end; padding: 14px 
   font-family: var(--sans); font-size: 14px; padding: 7px 9px;
   border: 1px solid var(--rule); background: var(--card); color: var(--ink);
 }
+
+
+/* ---------- Mobile / installed app ---------- */
+
+[data-tone="up"] { color: var(--up); }
+[data-tone="down"] { color: var(--down); }
+
+html { -webkit-text-size-adjust: 100%; }
+body { -webkit-tap-highlight-color: transparent; }
+
+/* Respect the notch and home indicator when installed full screen. */
+.wrap { padding-left: max(20px, env(safe-area-inset-left)); padding-right: max(20px, env(safe-area-inset-right)); }
+.masthead { padding-top: env(safe-area-inset-top); }
+footer { padding-bottom: calc(34px + env(safe-area-inset-bottom)); }
+
+/* iOS zooms the page when a focused input is under 16px. */
+@media (max-width: 860px) {
+  input, select, textarea, .field input[type="search"] { font-size: 16px; }
+  .btn, .toggle, .lg, .sitenav a { min-height: 44px; }
+  .btn, .toggle { display: inline-flex; align-items: center; }
+  /* In the card layout these are the primary action, so give them a full target. */
+  .btn.sm { min-height: 44px; padding: 6px 14px; }
+}
+
+@media (max-width: 860px) {
+  .controls { position: static; }
+  .leagues { overflow-x: auto; flex-wrap: nowrap; padding-bottom: 4px; -webkit-overflow-scrolling: touch; }
+  .leagues::-webkit-scrollbar { display: none; }
+  .lg { flex: 0 0 auto; }
+  /* Nine metrics stacked two-wide filled the whole first screen, so tighten
+     them into a compact three-column strip. */
+  .bank-inner { grid-template-columns: repeat(3, 1fr); }
+  .bank-cell { padding: 7px 8px; }
+  .bank-cell .n { font-size: 13.5px; letter-spacing: -0.02em; }
+  .bank-cell .k { font-size: 8.5px; letter-spacing: 0.07em; }
+  .masthead-inner { gap: 10px; padding-top: 16px; }
+  .sitenav { order: 3; width: 100%; }
+  .sitenav a { flex: 1; justify-content: center; display: inline-flex; align-items: center; }
+  .tz-badge { order: 2; }
+}
+
+/* Below this width a 10-column table is unusable, so each row becomes a card. */
+@media (max-width: 760px) {
+  .tablewrap { border: 0; background: transparent; overflow-x: visible; }
+  .tbl, .tbl tbody, .tbl tr, .tbl td { display: block; width: 100%; }
+  .tbl thead { display: none; }
+  .tbl tr {
+    background: var(--card); border: 1px solid var(--rule);
+    margin-bottom: 10px; padding: 4px 0;
+  }
+  .tbl tbody tr:hover { background: var(--card); }
+  .tbl tr.good { border-left: 3px solid var(--up); }
+  .tbl td {
+    display: flex; align-items: baseline; justify-content: space-between; gap: 12px;
+    padding: 7px 13px; border-bottom: 1px solid var(--rule-soft); text-align: left;
+  }
+  .tbl td:last-child { border-bottom: 0; }
+  .tbl td::before {
+    content: attr(data-label);
+    font-size: 10px; letter-spacing: 0.1em; text-transform: uppercase;
+    color: var(--ink-faint); font-weight: 600; font-family: var(--sans);
+    flex: 0 0 auto;
+  }
+  .tbl td > * { text-align: right; }
+  /* The matchup and position cells read as headings, so they stay left-aligned. */
+  .tbl td[data-label="Game"] > *,
+  .tbl td[data-label="Position"] > *,
+  .tbl td[data-label="Pick"] > * { text-align: left; }
+  .tbl td[data-label="Pick"] { display: block; }
+  .tbl td[data-label="Pick"]::before { display: block; margin-bottom: 3px; }
+  /* The matchup heads the card, so it gets no label and full width. */
+  .tbl td[data-label="Game"], .tbl td[data-label="Position"] {
+    display: block; background: var(--card-alt); text-align: left;
+    border-bottom: 1px solid var(--rule);
+  }
+  .tbl td[data-label="Game"]::before, .tbl td[data-label="Position"]::before { display: none; }
+  .tbl td.act { justify-content: flex-end; gap: 8px; }
+  .tbl td.act::before { margin-right: auto; }
+  .g-meta { text-align: left; }
+  .nets { max-width: none; }
+  .settings-grid { grid-template-columns: 1fr; }
+  dialog { width: calc(100% - 20px); }
+}
+
+@media (max-width: 420px) {
+  .bank-inner { grid-template-columns: repeat(2, 1fr); }
+  .wordmark h1 { font-size: 27px; }
+}
+
+/* Installed standalone: the browser chrome is gone, so reclaim the top space. */
+@media (display-mode: standalone) {
+  .masthead-inner { padding-top: 10px; }
+}

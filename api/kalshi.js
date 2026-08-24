@@ -34,19 +34,54 @@ async function kalshi(path, attempts = 3) {
   return null;
 }
 
-/** Kalshi quotes in cents; absent bids/asks mean nothing is resting on that side. */
+/**
+ * Normalise a Kalshi market to cents.
+ *
+ * The API reports prices as dollar strings ("0.5235") in *_dollars fields and
+ * sizes in *_fp fields, at deci-cent granularity - so a price is not always a
+ * whole number of cents. Older field names are kept as a fallback.
+ *
+ * A resting quote of zero means nothing is offered on that side, which is not
+ * the same as a price of zero, so it is reported as null.
+ */
+const toCents = (dollars, legacyCents) => {
+  if (dollars != null && dollars !== '') {
+    const n = Number(dollars);
+    if (Number.isFinite(n)) return Math.round(n * 10000) / 100; // deci-cent precision
+  }
+  const l = Number(legacyCents);
+  return Number.isFinite(l) ? l : null;
+};
+const quote = (dollars, legacyCents) => {
+  const c = toCents(dollars, legacyCents);
+  return c == null || c <= 0 || c >= 100 ? null : c;
+};
+const num = (...vals) => {
+  for (const v of vals) {
+    const n = Number(v);
+    if (Number.isFinite(n)) return n;
+  }
+  return 0;
+};
+
 function shapeMarket(m) {
+  const yesBid = quote(m.yes_bid_dollars, m.yes_bid);
+  const yesAsk = quote(m.yes_ask_dollars, m.yes_ask);
+  const noBid = quote(m.no_bid_dollars, m.no_bid);
+  const noAsk = quote(m.no_ask_dollars, m.no_ask);
   return {
     ticker: m.ticker,
     event: m.event_ticker,
     title: m.yes_sub_title || m.title || null,
-    yesBid: m.yes_bid ?? null,
-    yesAsk: m.yes_ask ?? null,
-    noBid: m.no_bid ?? null,
-    noAsk: m.no_ask ?? null,
-    last: m.last_price ?? null,
-    volume: m.volume ?? 0,
-    openInterest: m.open_interest ?? 0,
+    yesBid, yesAsk, noBid, noAsk,
+    last: quote(m.last_price_dollars, m.last_price),
+    bidSize: num(m.yes_bid_size_fp),
+    askSize: num(m.yes_ask_size_fp),
+    volume: num(m.volume_fp, m.volume),
+    volume24h: num(m.volume_24h_fp, m.volume_24h),
+    openInterest: num(m.open_interest_fp, m.open_interest),
+    liquidity: num(m.liquidity_dollars),
+    hasBook: yesBid != null || yesAsk != null,
     status: m.status ?? null,
     closeTime: m.close_time ?? null,
     result: m.result || null,
@@ -88,7 +123,7 @@ export default async function handler(req, res) {
     }));
 
     // Nested markets sometimes omit live quotes; backfill from the markets endpoint.
-    const needQuotes = events.some((e) => e.markets.some((m) => m.yesAsk == null));
+    const needQuotes = events.some((e) => e.markets.some((m) => !m.hasBook));
     if (needQuotes && events.length) {
       try {
         const mj = await kalshi(`/markets?series_ticker=${encodeURIComponent(series)}&status=open&limit=200`);
