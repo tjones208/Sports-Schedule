@@ -190,8 +190,15 @@ export default async function handler(req, res) {
         const season = year || String(start).slice(0, 4);
         const lines = await getSeasonLinesAll(season, cfbdKey);
         let matched = 0, priced = 0;
+        let byId = 0, byName = 0;
         for (const r of rows) {
-          const hit = lines.get(`${normalizeTeam(r.awayName)}|${normalizeTeam(r.homeName)}`);
+          // CFBD carries ESPN's event id, so this is an exact join.
+          let hit = lines.get(String(r.id));
+          if (hit) byId++;
+          else {
+            hit = lines.get(`${normalizeTeam(r.awayName)}|${normalizeTeam(r.homeName)}`);
+            if (hit) byName++;
+          }
           if (!hit) continue;
           matched++;
           const fair = fairProbabilityConsensus(
@@ -199,7 +206,8 @@ export default async function handler(req, res) {
           if (fair) { r.marketHome = fair.home; r.lineBooks = hit.books; priced++; }
         }
         lineJoin = { source: 'CollegeFootballData /lines', season,
-          linesLoaded: lines.size, matched, priced,
+          joinedById: byId, joinedByName: byName,
+          gamesWithLines: Math.floor(lines.size / 2), matched, priced,
           matchRate: Number(((matched / rows.length) * 100).toFixed(1)),
           unmatchedSample: rows.filter((r) => !r.marketHome).slice(0, 5)
             .map((r) => `${r.awayName} at ${r.homeName}`) };
