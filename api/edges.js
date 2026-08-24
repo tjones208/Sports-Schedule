@@ -57,6 +57,8 @@ export default async function handler(req, res) {
   const minEdge = (Number(q.minEdge) || 0) / 100;
   const fpiW = Math.min(1, Math.max(0, q.fpi == null ? 0.35 : Number(q.fpi)));
   const role = q.role === 'maker' ? 'maker' : 'taker';
+  const method = ['multiplicative', 'additive', 'power', 'shin'].includes(q.method)
+    ? q.method : 'multiplicative';
 
   try {
     // 1. Kalshi open markets for this league
@@ -85,7 +87,7 @@ export default async function handler(req, res) {
       try {
         const j = await J(`${SITE}/${L.path}/scoreboard?dates=${d.replace(/-/g, '')}&${extra}`);
         for (const ev of j.events || []) {
-          const g = normalizeEvent(ev, L, 'denver');
+          const g = normalizeEvent(ev, L, 'denver', method);
           if (g && g.fair) games.push(g);
         }
       } catch { /* skip the day */ }
@@ -174,7 +176,20 @@ export default async function handler(req, res) {
     res.setHeader('Cache-Control', 'public, s-maxage=120, stale-while-revalidate=600');
     res.status(200).json({
       league, tradeable: true, generatedAt: new Date().toISOString(),
-      settings: { bankroll, kellyFraction: frac, maxStakePct: maxStake, fpiWeight: fpiW, role },
+      settings: { bankroll, kellyFraction: frac, maxStakePct: maxStake, fpiWeight: fpiW, role, devig: method },
+      // Edge grouped by what the contract costs. A method that is fair across
+      // the price range should look flat here; a slope means the devig is
+      // manufacturing edge at one end of the book.
+      byPrice: (() => {
+        const buckets = [[1, 15], [15, 35], [35, 65], [65, 85], [85, 99]];
+        return buckets.map(([lo, hi]) => {
+          const inb = picks.filter((x) => x.ask >= lo && x.ask < hi);
+          const avg = inb.length ? inb.reduce((t, x) => t + x.netEdgePts, 0) / inb.length : null;
+          return { range: `${lo}-${hi}c`, n: inb.length,
+            avgEdge: avg == null ? null : Number(avg.toFixed(2)),
+            positive: inb.filter((x) => x.netEdgePts > 0).length };
+        });
+      })(),
       matchedMarkets: rows.length, withFpi: fpi.size,
       qualifying: qualifying.length,
       totalStake: Number(qualifying.reduce((s, p) => s + p.stake, 0).toFixed(2)),
