@@ -176,6 +176,64 @@ probability still visible and the Log button disabled - the join is working, the
 is just nothing to price against yet. Quotes typically appear in the days before
 kickoff.
 
+### FPI strategy tab
+
+A separate tab that ignores the blend entirely and runs one mechanical rule across
+every sport at once:
+
+    buy when the Kalshi ask sits at least N points below ESPN's own FPI price.
+
+For each game it shows the FPI probability, the live Kalshi ask, and the **target** -
+the highest price worth paying - and flags the ones where the market is actually
+offering that price. The discount defaults to 5 points and is editable; so are the
+FPI range (lower and upper bound), the contract size, the sport, the date window, and
+whether to show both sides of a game or only the side FPI favours.
+
+The whole thing rests on one identity. Buying at `FPI - d` cents gives an expected
+value per contract of
+
+    FPI x 100 - price - fee  =  d - fee
+
+so the expected profit is the discount minus the fee, in cents, regardless of what FPI
+itself is. That is why the tab and the backtest both speak in points: at 100 contracts,
+one point of discount is worth exactly $1 per game. `test/fpi.test.mjs` pins this down.
+
+#### Where the 5 points came from
+
+It was fitted on **FBS college football only** - 2,396 games across 2023-2025 - comparing
+ESPN FPI against closing market prices. The required discount by FPI band, in points:
+
+| Band | 2023 | 2024 | 2025 | Worst | Fee share | Model error |
+|---|---|---|---|---|---|---|
+| 50-60% | 3.78 | 0.30 | 6.52 | **6.52** | 1.73 | 4.79 |
+| 60-70% | -0.55 | 7.80 | -0.21 | **7.80** | 1.59 | 6.21 |
+| 70-80% | 5.05 | 1.66 | 3.52 | **5.05** | 1.31 | 3.74 |
+| 80-90% | -2.79 | 2.00 | -1.91 | **2.00** | 0.91 | 1.09 |
+| 90-100% | 1.34 | 0.33 | 1.27 | **1.34** | 0.34 | 1.00 |
+
+Pooled and game-weighted across the three seasons: 3.42 / 2.31 / 3.36 / -1.00 / 1.00.
+A negative number means that band was profitable at FPI's own price with no discount at all.
+
+Three things follow, and the tab says all three on screen:
+
+1. **Five points is a pooled average, not a per-band rule.** The requirement ranges from
+   -2.79 to +7.80 - a 10.6-point spread. A single threshold that survives every band in
+   every season would have to be 7.8.
+2. **The fee is not flat.** It runs 1.73 points at 55c down to 0.34 at 95c, because Kalshi
+   charges 7% x price x (1 - price). A perfectly calibrated model still needs five times
+   more discount at a coinflip than at a lock. The *Add fee on top* checkbox switches the
+   rule to `ask <= FPI - (fee + N)`, pricing the fee at the FPI probability so the target
+   does not slide as the market moves.
+3. **The per-band requirement is unstable year to year.** The 60-70% band needed nothing in
+   2023 and 2025 but 7.80 points in 2024. This is the weakest point in the whole strategy
+   and the reason the tab shows the worst season next to the pooled average.
+
+The *Apply band* buttons set the FPI range and the discount to that band's worst-season
+requirement, rounded up.
+
+**NFL, NBA, NHL and college basketball are shown because every sport was asked for, but no
+equivalent backtest has been run on them.** Treat those rows as untested.
+
 **Positions** tracks what you took, marks it to the live Kalshi bid, and settles it
 won or lost. **Performance** reports record, ROI on stake, P&L by league, and a
 calibration table - whether contracts you bought near 60c actually won about 60% of

@@ -45,6 +45,7 @@
   <div class="controls">
     <div class="leagues" id="tabs">
       <button class="lg" data-tab="edges" aria-pressed="true">Edges</button>
+      <button class="lg" data-tab="fpi" aria-pressed="false">FPI strategy <span class="ct" id="fpiCount"></span></button>
       <button class="lg" data-tab="positions" aria-pressed="false">Positions <span class="ct" id="posCount">0</span></button>
       <button class="lg" data-tab="performance" aria-pressed="false">Performance</button>
       <button class="lg" data-tab="settings" aria-pressed="false">Settings</button>
@@ -87,6 +88,54 @@
       <button class="btn" id="refresh" type="button">Refresh markets</button>
     </div>
     <div id="edges"></div>
+  </section>
+
+  <!-- FPI STRATEGY -->
+  <section id="panel-fpi" class="panel" hidden>
+    <div class="filters">
+      <select id="fpiLeague" aria-label="Sport">
+        <option value="all">All sports</option>
+        <option value="nfl">NFL</option>
+        <option value="ncaaf">College Football</option>
+        <option value="nba">NBA</option>
+        <option value="nhl">NHL</option>
+        <option value="ncaab">College Basketball</option>
+      </select>
+      <label class="toggle" for="fpiDisc">Discount
+        <input type="number" id="fpiDisc" min="0" max="40" step="0.1" value="5" style="width:62px"
+          aria-label="Points the Kalshi ask must sit below the ESPN FPI price">
+        <span>pts</span>
+      </label>
+      <label class="toggle"><input type="checkbox" id="fpiAddFee"> Add fee on top</label>
+      <label class="toggle" for="fpiLow">FPI
+        <input type="number" id="fpiLow" min="0" max="100" step="1" value="50" style="width:58px" aria-label="Lower FPI bound, percent">
+        <span>&ndash;</span>
+        <input type="number" id="fpiHigh" min="0" max="100" step="1" value="100" style="width:58px" aria-label="Upper FPI bound, percent">
+        <span>%</span>
+      </label>
+      <label class="toggle" for="fpiQty">Size
+        <input type="number" id="fpiQty" min="1" max="10000" step="1" value="100" style="width:70px" aria-label="Contracts per trade">
+        <span>ct</span>
+      </label>
+      <label class="toggle"><input type="checkbox" id="fpiTrigOnly"> Triggers only</label>
+      <label class="toggle"><input type="checkbox" id="fpiQuotedOnly" checked> Quoted only</label>
+      <label class="toggle"><input type="checkbox" id="fpiBoth"> Both sides</label>
+      <label class="toggle" for="fpiFrom">From <input type="date" id="fpiFrom" aria-label="Only games on or after this date"></label>
+      <label class="toggle" for="fpiTo">To <input type="date" id="fpiTo" aria-label="Only games on or before this date"></label>
+      <label class="toggle" for="fpiSort">Sort
+        <select id="fpiSort" aria-label="Sort order">
+          <option value="surplus">Best vs target</option>
+          <option value="fpi">Highest FPI</option>
+          <option value="date">Game date</option>
+          <option value="price">Cheapest ask</option>
+          <option value="pnl">Biggest expected P&amp;L</option>
+        </select>
+      </label>
+      <button class="btn" id="fpiReset" type="button">Reset filters</button>
+      <span class="spacer"></span>
+      <button class="btn" id="fpiReload" type="button">Reload all sports</button>
+    </div>
+    <div id="fpiOut"></div>
   </section>
 
   <!-- POSITIONS -->

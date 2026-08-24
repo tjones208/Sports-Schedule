@@ -434,6 +434,21 @@ dialog menu { display: flex; gap: 8px; justify-content: flex-end; padding: 14px 
 }
 .warnchip { color: var(--down); border-color: color-mix(in srgb, var(--down) 40%, var(--rule)); }
 .restchip { color: var(--ink-faint); }
+
+/* FPI strategy tab */
+.trigchip, .passchip, .lgchip {
+  display: inline-block; font-family: var(--mono); font-size: 10px;
+  padding: 2px 6px; white-space: nowrap; letter-spacing: 0.06em;
+}
+.trigchip {
+  color: var(--paper); background: var(--up);
+  border: 1px solid var(--up); font-weight: 600;
+}
+.passchip { color: var(--ink-faint); border: 1px solid var(--rule); }
+.lgchip {
+  color: var(--ink-faint); border: 1px solid var(--rule);
+  padding: 1px 4px; margin-right: 4px; font-size: 9.5px;
+}
 .settings-grid select {
   font-family: var(--sans); font-size: 14px; padding: 7px 9px;
   border: 1px solid var(--rule); background: var(--card); color: var(--ink);

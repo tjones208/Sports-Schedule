@@ -19,6 +19,21 @@ const DEFAULTS = {
   fpiWeight: 0.35,       // how much the ESPN model counts in the blend
   sortBy: 'edge',        // edge | date | stake | price
   bothSides: false,      // one row per game unless asked for both
+
+  // FPI strategy tab. The discount is the headline number from the college
+  // football backtest: how far below ESPN's own price Kalshi has to be before
+  // buying at that price has been worth it historically.
+  fpiDiscountPts: 5,
+  fpiAddFee: false,      // treat the discount as a margin on top of the fee
+  fpiLowPct: 50,
+  fpiHighPct: 100,
+  fpiContracts: 100,     // the backtest sized every game at 100 contracts
+  fpiBothSides: false,
+  fpiTriggersOnly: false,
+  fpiQuotedOnly: true,
+  fpiLeague: 'all',
+  fpiSort: 'surplus',
+
   positions: [],
 };
 
@@ -437,6 +452,467 @@ function renderEdges() {
   });
 }
 
+/* ---------- FPI strategy tab ----------
+
+   A single, mechanical rule, kept deliberately separate from the Edges tab:
+
+     buy when the Kalshi ask sits at least N points below ESPN's own FPI price.
+
+   The Edges tab blends the sportsbook line with FPI and sizes by Kelly. This
+   tab does none of that. It takes FPI at face value, subtracts a fixed
+   discount, and tells you whether the market is offering that price. That is
+   exactly the rule the college-football backtest measured, so the numbers here
+   mean the same thing the backtest numbers meant.
+
+   Calibration caveat, repeated on screen: the discount was fitted on FBS
+   college football only (2023-2025). NFL, NBA, NHL and college basketball are
+   shown because you asked for every sport, but no equivalent backtest has been
+   run on them.                                                              */
+
+const ALL_LEAGUES = ['nfl', 'ncaaf', 'nba', 'nhl', 'ncaab'];
+const FPI_WINDOW_DAYS = 14;
+const FPI_MAX_IDS_PER_LEAGUE = 240;
+
+// Pooled 2023-2025 FBS requirement by FPI band, and the worst single season.
+// Shown as a reference so you can set the discount per band rather than flat.
+const BAND_REFERENCE = [
+  { lo: 50, hi: 60, pooled: 3.42, worst: 6.52, fee: 1.73, games: 584 },
+  { lo: 60, hi: 70, pooled: 2.31, worst: 7.80, fee: 1.59, games: 518 },
+  { lo: 70, hi: 80, pooled: 3.36, worst: 5.05, fee: 1.31, games: 512 },
+  { lo: 80, hi: 90, pooled: -1.00, worst: 2.00, fee: 0.91, games: 438 },
+  { lo: 90, hi: 100, pooled: 1.00, worst: 1.34, fee: 0.34, games: 344 },
+];
+
+let fpiRows = [];          // every matched side, before filters
+let fpiDiag = [];          // per-league load report
+let fpiLoading = false;
+let fpiLoaded = false;
+let fpiFrom = '';
+let fpiTo = '';
+
+/* ---------- loading ---------- */
+
+async function loadFpiUniverse() {
+  if (fpiLoading) return;
+  fpiLoading = true;
+  fpiRows = [];
+  fpiDiag = [];
+
+  const from = fpiFrom || todayMT();
+  const to = fpiTo || addDays(from, FPI_WINDOW_DAYS);
+  const el = document.getElementById('fpiOut');
+  el.innerHTML = `<div class="empty"><h3>Loading every sport</h3>
+    <p>Pulling schedules, Kalshi order books and ESPN FPI projections for
+    <strong>${esc(from)}</strong> to <strong>${esc(to)}</strong> across NFL, college football,
+    NBA, NHL and college basketball. This is five sports at once, so give it a few seconds.</p></div>`;
+
+  const perLeague = await Promise.all(ALL_LEAGUES.map(async (league) => {
+    const [sRes, kRes] = await Promise.allSettled([
+      getJSON(`/api/schedule?league=${league}&start=${from}&end=${to}`),
+      getJSON(`/api/kalshi?series=${GAME_SERIES[league]}`),
+    ]);
+
+    // Out of season, the schedule endpoint reports "no games" rather than an
+    // outage. That is an empty league, not a failure, and should not read as one.
+    const noGames = sRes.status === 'rejected' && /no games/i.test(sRes.reason.message || '');
+    const games = sRes.status === 'fulfilled' ? (sRes.value.games || []) : [];
+    const events = kRes.status === 'fulfilled' ? (kRes.value.events || []) : [];
+
+    const pairs = [];
+    for (const ev of events) {
+      const parsed = parseEventTicker(ev.ticker);
+      if (!parsed) continue;
+      const game = games.find((g) => eventMatchesGame(ev, g, parsed));
+      if (game) pairs.push({ game, ev });
+    }
+
+    return {
+      league, games, events, pairs, noGames,
+      scheduleError: sRes.status === 'rejected' && !noGames ? sRes.reason.message : null,
+      kalshiError: kRes.status === 'rejected' ? kRes.reason.message : null,
+    };
+  }));
+
+  // FPI, one batched call per 60 matched games. Only matched games are asked
+  // for - an unmatched game has no market to compare a projection against.
+  await Promise.all(perLeague.map(async (L) => {
+    const ids = [...new Set(L.pairs.map((p) => String(p.game.id).replace(/^[a-z]+-/, '')))]
+      .slice(0, FPI_MAX_IDS_PER_LEAGUE);
+    L.fpi = new Map();
+    for (let i = 0; i < ids.length; i += 60) {
+      try {
+        const j = await getJSON(`/api/predictor?league=${L.league}&ids=${ids.slice(i, i + 60).join(',')}`);
+        for (const [k, v] of Object.entries(j.predictions || {})) L.fpi.set(k, v);
+      } catch { /* a league without projections simply contributes no rows */ }
+    }
+  }));
+
+  const rows = [];
+  for (const L of perLeague) {
+    let withFpi = 0;
+    for (const { game, ev } of L.pairs) {
+      const p = L.fpi.get(String(game.id).replace(/^[a-z]+-/, ''));
+      if (!p) continue;
+      withFpi++;
+      for (const [side, team, opp, prob] of [
+        ['home', game.home, game.away, p.homeWin],
+        ['away', game.away, game.home, p.awayWin],
+      ]) {
+        if (prob == null || !Number.isFinite(prob)) continue;
+        const mkt = marketForTeam(ev, team);
+        if (!mkt) continue;
+        rows.push({
+          league: L.league, game, ev, mkt, side, team, opp,
+          fpi: prob,
+          ask: mkt.yesAsk ?? null,
+          bid: mkt.yesBid ?? null,
+          last: mkt.last ?? null,
+          book: game.fair ? game.fair[side] ?? null : null,
+          volume: mkt.volume || 0,
+          openInterest: mkt.openInterest || 0,
+          predPointDiff: p.predPointDiff ?? null,
+        });
+      }
+    }
+    fpiDiag.push({
+      league: L.league, games: L.games.length, events: L.events.length,
+      matched: L.pairs.length, withFpi,
+      noGames: L.noGames, scheduleError: L.scheduleError, kalshiError: L.kalshiError,
+    });
+  }
+
+  fpiRows = rows;
+  fpiLoaded = true;
+  fpiLoading = false;
+  renderFpi();
+}
+
+/* ---------- the rule ---------- */
+
+/**
+ * What the ask has to be for this side to trigger.
+ *
+ * The fee component is priced at the FPI probability rather than at the ask, so
+ * the target is a fixed property of the game and does not slide around as the
+ * market moves. That also matches how the backtest computed the fee share of
+ * each band's requirement.
+ */
+function fpiTarget(r) {
+  const fpiCents = r.fpi * 100;
+  const feePts = state.fpiAddFee ? feePerContractCents(fpiCents, state.feeRole) : 0;
+  const required = state.fpiDiscountPts + feePts;
+  return { required, feePts, target: fpiCents - required };
+}
+
+function decorateFpi(r) {
+  const { required, feePts, target } = fpiTarget(r);
+  const qty = Math.max(1, Math.round(state.fpiContracts) || 1);
+  const out = { ...r, required, feePts, target, qty };
+
+  if (r.ask == null) {
+    return { ...out, quoted: false, gap: null, surplus: null, trigger: false,
+      cost: null, fee: null, evDollars: null, evPerContract: null };
+  }
+
+  const gap = r.fpi * 100 - r.ask;           // points the market sits below FPI
+  const surplus = gap - required;            // how far past the threshold
+  const fee = orderFeeDollars(qty, r.ask, state.feeRole);
+  const cost = qty * (r.ask / 100);
+  // If FPI is the truth, this is what the position is worth on average.
+  const evDollars = qty * (r.fpi - r.ask / 100) - fee;
+
+  return { ...out, quoted: true, gap, surplus, trigger: surplus >= 0,
+    cost, fee, evDollars, evPerContract: evDollars / qty * 100 };
+}
+
+/* ---------- filtering ---------- */
+
+function visibleFpiRows() {
+  let rows = fpiRows.map(decorateFpi);
+
+  if (state.fpiLeague !== 'all') rows = rows.filter((r) => r.league === state.fpiLeague);
+  if (fpiFrom) rows = rows.filter((r) => r.game.date >= fpiFrom);
+  if (fpiTo) rows = rows.filter((r) => r.game.date <= fpiTo);
+
+  if (!state.fpiBothSides) {
+    // One row per game: the side FPI actually favours.
+    const best = new Map();
+    for (const r of rows) {
+      const cur = best.get(r.game.id);
+      if (!cur || r.fpi > cur.fpi) best.set(r.game.id, r);
+    }
+    rows = [...best.values()];
+  }
+
+  const lo = Math.min(state.fpiLowPct, state.fpiHighPct);
+  const hi = Math.max(state.fpiLowPct, state.fpiHighPct);
+  rows = rows.filter((r) => r.fpi * 100 >= lo && r.fpi * 100 <= hi);
+
+  if (state.fpiQuotedOnly) rows = rows.filter((r) => r.quoted);
+  if (state.fpiTriggersOnly) rows = rows.filter((r) => r.trigger);
+
+  const low = (v) => (v == null ? Number.NEGATIVE_INFINITY : v);
+  const byDate = (a, b) => a.game.date.localeCompare(b.game.date)
+    || (a.game.sortKey ?? 0) - (b.game.sortKey ?? 0)
+    || low(b.surplus) - low(a.surplus);
+
+  const sorters = {
+    surplus: (a, b) => low(b.surplus) - low(a.surplus) || byDate(a, b),
+    fpi: (a, b) => b.fpi - a.fpi || byDate(a, b),
+    date: byDate,
+    price: (a, b) => (a.ask ?? 999) - (b.ask ?? 999) || byDate(a, b),
+    pnl: (a, b) => low(b.evDollars) - low(a.evDollars) || byDate(a, b),
+  };
+  return rows.sort(sorters[state.fpiSort] || sorters.surplus);
+}
+
+/* ---------- rendering ---------- */
+
+function fpiLoadNote() {
+  const parts = fpiDiag.map((d) => {
+    const label = LEAGUE_LABEL[d.league] || d.league;
+    if (d.scheduleError) return `${label}: schedule failed (${esc(d.scheduleError)})`;
+    if (d.kalshiError) return `${label}: Kalshi failed (${esc(d.kalshiError)})`;
+    if (d.noGames) return `${label}: no games in range`;
+    if (!d.events) return `${label}: no open Kalshi events`;
+    return `${label}: ${d.withFpi}/${d.matched} matched games with a projection`;
+  });
+  return parts.join(' &middot; ');
+}
+
+function renderFpi() {
+  const el = document.getElementById('fpiOut');
+  if (fpiLoading) return;
+  if (!fpiLoaded) {
+    el.innerHTML = '<div class="empty"><h3>Not loaded yet</h3><p>Press <em>Reload all sports</em>.</p></div>';
+    return;
+  }
+
+  const rows = visibleFpiRows();
+  const triggers = rows.filter((r) => r.trigger);
+  const totalCost = triggers.reduce((s, r) => s + r.cost, 0);
+  const totalEv = triggers.reduce((s, r) => s + r.evDollars, 0);
+  const totalFee = triggers.reduce((s, r) => s + r.fee, 0);
+  const avgGap = triggers.length
+    ? triggers.reduce((s, r) => s + r.gap, 0) / triggers.length : null;
+
+  document.getElementById('fpiCount').textContent = triggers.length ? String(triggers.length) : '';
+
+  const ruleLine = state.fpiAddFee
+    ? `ask &le; FPI &minus; (fee + ${state.fpiDiscountPts} pts)`
+    : `ask &le; FPI &minus; ${state.fpiDiscountPts} pts`;
+
+  const summary = `<div class="summary">
+    <div class="stat"><span class="n">${triggers.length}</span><span class="k">Triggers</span></div>
+    <div class="stat"><span class="n">${rows.length}</span><span class="k">Games shown</span></div>
+    <div class="stat"><span class="n">${avgGap == null ? '--' : avgGap.toFixed(1)}</span><span class="k">Avg pts below FPI</span></div>
+    <div class="stat"><span class="n">${money(totalCost)}</span><span class="k">Cost to take all</span></div>
+    <div class="stat"><span class="n ${totalEv > 0 ? 'up' : totalEv < 0 ? 'down' : ''}">${money(totalEv)}</span><span class="k">Expected P&amp;L if FPI is right</span></div>
+  </div>`;
+
+  // The results area swaps between a table and an empty state, but the rule
+  // explainer and the band reference below it always render - they are
+  // documentation, and a filter that matches nothing is exactly when you need
+  // them. (Losing the Apply-band buttons there would strand you.)
+  const body = !rows.length
+    ? `<div class="empty"><h3>Nothing matches those filters</h3>
+      <p>${fpiRows.length
+        ? `${fpiRows.length} sides are loaded. Widen the FPI range, lower the discount, untick
+           <em>Triggers only</em>, or clear the sport filter.`
+        : 'No Kalshi market lined up with a game that has an ESPN FPI projection in this window. '
+          + 'Kalshi opens most game books only in the days before tip-off.'}</p></div>`
+    : `<div class="tablewrap"><table class="tbl">
+    <thead><tr>
+      <th>Game</th><th>Pick</th>
+      <th class="r">ESPN FPI</th><th class="r">Kalshi ask</th><th class="r">Target</th>
+      <th class="r">Gap</th><th class="r">vs target</th>
+      <th>Signal</th><th class="r">Expected P&amp;L</th><th></th>
+    </tr></thead><tbody>
+    ${rows.map((r, i) => {
+      const g = r.game;
+      return `<tr class="${r.trigger ? 'good' : ''}">
+        <td data-label="Game">
+          <div class="g-teams">${esc(r.game.away.short || r.game.away.name)} at ${esc(r.game.home.short || r.game.home.name)}</div>
+          <div class="g-meta"><span class="lgchip">${esc(LEAGUE_LABEL[r.league] || r.league)}</span>
+            ${esc(g.weekday)} ${esc(g.date)} &middot; ${esc(g.time)} ${esc(g.tz)}
+            ${g.networks?.length ? `&middot; ${esc(g.networks.join(', '))}` : ''}</div>
+        </td>
+        <td data-label="Pick"><strong>${esc(r.team.short || r.team.name)}</strong>
+          <div class="g-meta">${r.side === 'home' ? 'home' : 'away'}${
+            r.book == null ? '' : ` &middot; book ${pct(r.book, 0)}`}</div></td>
+        <td class="r mono" data-label="ESPN FPI"><strong>${pct(r.fpi, 1)}</strong></td>
+        <td class="r mono" data-label="Kalshi ask">${r.quoted ? cents(r.ask)
+          : '<span class="pending">no book</span>'}
+          ${r.quoted && r.bid != null ? `<div class="g-meta">bid ${cents(r.bid)}</div>` : ''}</td>
+        <td class="r mono" data-label="Target"><strong>${r.target.toFixed(1)}&cent;</strong>
+          <div class="g-meta">need ${r.required.toFixed(1)} pts${
+            state.fpiAddFee ? ` (${r.feePts.toFixed(2)} fee)` : ''}</div></td>
+        <td class="r mono" data-label="Gap" data-tone="${!r.quoted ? '' : r.gap > 0 ? 'up' : 'down'}">${
+          r.quoted ? `${r.gap >= 0 ? '+' : ''}${r.gap.toFixed(1)}` : '--'}</td>
+        <td class="r mono" data-label="vs target" data-tone="${!r.quoted ? '' : r.surplus >= 0 ? 'up' : 'down'}">${
+          r.quoted ? `${r.surplus >= 0 ? '+' : ''}${r.surplus.toFixed(1)}` : '--'}</td>
+        <td data-label="Signal">${r.quoted
+          ? (r.trigger
+            ? '<span class="trigchip">TRADE</span>'
+            : `<span class="passchip">pass</span><div class="g-meta">${
+              Math.abs(r.surplus).toFixed(1)} pts too rich</div>`)
+          : '<span class="pending">no quote</span>'}</td>
+        <td class="r mono" data-label="Expected P&amp;L" data-tone="${
+          !r.quoted ? '' : r.evDollars > 0 ? 'up' : 'down'}">${r.quoted
+            ? `${money(r.evDollars)}<div class="g-meta">${r.qty} @ ${cents(r.ask)} = ${money(r.cost)} &middot; ${money(r.fee)} fee</div>`
+            : '--'}</td>
+        <td class="r act"><button class="btn sm" data-fpilog="${i}"${r.quoted ? '' : ' disabled'}>Log</button></td>
+      </tr>`;
+    }).join('')}
+  </tbody></table></div>`;
+
+  el.innerHTML = `${summary}${body}
+
+  <p class="fineprint"><strong>The rule on this tab is ${ruleLine}.</strong>
+  <strong>Target</strong> is the highest price you should pay for that side.
+  <strong>Gap</strong> is how many points below FPI the ask already sits, and
+  <strong>vs target</strong> is what is left after the discount is taken out &mdash; anything
+  at or above zero is flagged TRADE. <strong>Expected P&amp;L</strong> assumes FPI is exactly
+  right and is net of Kalshi's ${state.feeRole} fee at ${state.fpiContracts} contracts; it is
+  the average outcome over many trades, not what any single game pays.
+  One point of discount is worth exactly $1 per game per 100 contracts, which is why the
+  backtest and this tab both speak in points.</p>
+
+  <h3 class="sec">Where the 5 points came from &mdash; and where it does not apply</h3>
+  <p class="fineprint">The discount was fitted on <strong>FBS college football only</strong>,
+  2,396 games across 2023-2025, comparing ESPN FPI against closing market prices. Five points is
+  roughly the <em>pooled average</em> requirement across all bands and seasons. It is not a
+  per-band number and it is not stable year to year: the 60-70% band needed no discount at all in
+  2023 and 2025 but 7.8 points in 2024. A single threshold that survives every band in every
+  season would have to be 7.8. Use the table below to set the discount for the band you are
+  actually trading, and treat NFL, NBA, NHL and college basketball rows as untested &mdash; no
+  equivalent backtest has been run on them.</p>
+  <div class="tablewrap"><table class="tbl">
+    <thead><tr><th>FPI band</th><th class="r">Games</th><th class="r">Pooled need</th>
+      <th class="r">Worst season</th><th class="r">Fee share</th><th></th></tr></thead>
+    <tbody>${BAND_REFERENCE.map((b) => `<tr>
+      <td class="mono" data-label="FPI band">${b.lo}-${b.hi}%</td>
+      <td class="r mono" data-label="Games">${b.games}</td>
+      <td class="r mono" data-label="Pooled need">${b.pooled.toFixed(2)}</td>
+      <td class="r mono" data-label="Worst season">${b.worst.toFixed(2)}</td>
+      <td class="r mono" data-label="Fee share">${b.fee.toFixed(2)}</td>
+      <td class="r act"><button class="btn sm" data-band="${b.lo}-${b.hi}">Apply band</button></td>
+    </tr>`).join('')}</tbody></table></div>
+  <p class="fineprint">All figures in points below FPI. <strong>Pooled need</strong> is the
+  game-weighted 2023-2025 requirement; a negative number means that band was profitable at FPI's
+  own price, with no discount. <strong>Worst season</strong> is the single worst of the three, and
+  is the number to use if you cannot tolerate a losing year. <strong>Fee share</strong> is how much
+  of the requirement is Kalshi's fee rather than model error &mdash; it collapses toward the tails
+  because the fee is 7% x price x (1 - price). <em>Apply band</em> sets the FPI range and the
+  discount to that band's worst-season requirement.</p>
+  <p class="fineprint">${fpiLoadNote()}</p>`;
+
+  el.querySelectorAll('[data-fpilog]').forEach((b) => {
+    b.addEventListener('click', () => openFpiLog(rows[Number(b.dataset.fpilog)]));
+  });
+  el.querySelectorAll('[data-band]').forEach((b) => {
+    b.addEventListener('click', () => {
+      const [lo, hi] = b.dataset.band.split('-').map(Number);
+      const ref = BAND_REFERENCE.find((x) => x.lo === lo && x.hi === hi);
+      state.fpiLowPct = lo;
+      state.fpiHighPct = hi;
+      // Round the requirement *up* to the input's step. Rounding 5.05 down to
+      // 5.0 would quietly apply a thinner discount than the season demanded.
+      state.fpiDiscountPts = ref
+        ? Math.max(0, Math.ceil(ref.worst * 10) / 10)
+        : state.fpiDiscountPts;
+      state.fpiAddFee = false;
+      save(); syncFpiControls(); renderFpi();
+      toast(`Filtering ${lo}-${hi}% at a ${state.fpiDiscountPts}-point discount (that band's worst season).`);
+    });
+  });
+}
+
+function openFpiLog(r) {
+  const f = document.getElementById('logForm');
+  document.getElementById('logTitle').textContent = 'Log position';
+  f.ticker.value = r.mkt.ticker;
+  f.title.value = `${r.team.short || r.team.name} to beat ${r.opp.short || r.opp.name}`;
+  f.league.value = r.game.league;
+  f.side.value = 'YES';
+  f.price.value = Number(r.ask).toFixed(1);
+  f.contracts.value = r.qty;
+  f.note.value = `FPI rule: ${pct(r.fpi, 1)} FPI, target ${r.target.toFixed(1)}c, `
+    + `ask ${cents(r.ask)} (${r.gap.toFixed(1)} pts below FPI, ${r.surplus >= 0 ? '+' : ''}${r.surplus.toFixed(1)} vs target)`;
+  updateCost();
+  document.getElementById('logDialog').showModal();
+}
+
+/* ---------- controls ---------- */
+
+function syncFpiControls() {
+  const set = (id, v) => { const e = document.getElementById(id); if (e) e.value = v; };
+  const check = (id, v) => { const e = document.getElementById(id); if (e) e.checked = v; };
+  set('fpiDisc', state.fpiDiscountPts);
+  set('fpiLow', state.fpiLowPct);
+  set('fpiHigh', state.fpiHighPct);
+  set('fpiQty', state.fpiContracts);
+  set('fpiLeague', state.fpiLeague);
+  set('fpiSort', state.fpiSort);
+  set('fpiFrom', fpiFrom);
+  set('fpiTo', fpiTo);
+  check('fpiAddFee', state.fpiAddFee);
+  check('fpiTrigOnly', state.fpiTriggersOnly);
+  check('fpiQuotedOnly', state.fpiQuotedOnly);
+  check('fpiBoth', state.fpiBothSides);
+}
+
+function wireFpi() {
+  const num = (id, key, lo, hi) => document.getElementById(id).addEventListener('change', (e) => {
+    const v = Number(e.target.value);
+    if (!Number.isFinite(v)) { e.target.value = state[key]; return; }
+    state[key] = Math.min(hi, Math.max(lo, v));
+    e.target.value = state[key];
+    save(); renderFpi();
+  });
+  num('fpiDisc', 'fpiDiscountPts', 0, 40);
+  num('fpiLow', 'fpiLowPct', 0, 100);
+  num('fpiHigh', 'fpiHighPct', 0, 100);
+  num('fpiQty', 'fpiContracts', 1, 10000);
+
+  const flag = (id, key) => document.getElementById(id).addEventListener('change', (e) => {
+    state[key] = e.target.checked; save(); renderFpi();
+  });
+  flag('fpiAddFee', 'fpiAddFee');
+  flag('fpiTrigOnly', 'fpiTriggersOnly');
+  flag('fpiQuotedOnly', 'fpiQuotedOnly');
+  flag('fpiBoth', 'fpiBothSides');
+
+  document.getElementById('fpiLeague').addEventListener('change', (e) => {
+    state.fpiLeague = e.target.value; save(); renderFpi();
+  });
+  document.getElementById('fpiSort').addEventListener('change', (e) => {
+    state.fpiSort = e.target.value; save(); renderFpi();
+  });
+
+  // Dates bound the schedule request, so a change means a refetch.
+  document.getElementById('fpiFrom').addEventListener('change', (e) => {
+    fpiFrom = e.target.value; loadFpiUniverse();
+  });
+  document.getElementById('fpiTo').addEventListener('change', (e) => {
+    fpiTo = e.target.value; loadFpiUniverse();
+  });
+
+  document.getElementById('fpiReload').addEventListener('click', () => loadFpiUniverse());
+  document.getElementById('fpiReset').addEventListener('click', () => {
+    for (const k of ['fpiDiscountPts', 'fpiAddFee', 'fpiLowPct', 'fpiHighPct',
+      'fpiContracts', 'fpiBothSides', 'fpiTriggersOnly', 'fpiQuotedOnly',
+      'fpiLeague', 'fpiSort']) state[k] = DEFAULTS[k];
+    save();
+    const from = todayMT();
+    const to = addDays(from, FPI_WINDOW_DAYS);
+    const refetch = fpiFrom !== from || fpiTo !== to;
+    fpiFrom = from; fpiTo = to;
+    syncFpiControls();
+    if (refetch) loadFpiUniverse(); else renderFpi();
+  });
+}
+
 /* ---------- rendering: positions ---------- */
 
 function renderPositions() {
@@ -779,7 +1255,7 @@ function refreshDerived() { matched = buildRows(); renderEdges(); }
 
 function showTab(name) {
   tab = name;
-  for (const p of ['edges', 'positions', 'performance', 'settings']) {
+  for (const p of ['edges', 'fpi', 'positions', 'performance', 'settings']) {
     document.getElementById(`panel-${p}`).hidden = p !== name;
   }
   document.querySelectorAll('#tabs .lg').forEach((b) => {
@@ -788,6 +1264,8 @@ function showTab(name) {
   if (name === 'positions') { renderPositions(); refreshMarks(); }
   if (name === 'performance') renderPerformance();
   if (name === 'settings') renderSettings();
+  // Five sports at once is an expensive load, so it waits until the tab is opened.
+  if (name === 'fpi') { if (fpiLoaded || fpiLoading) renderFpi(); else loadFpiUniverse(); }
 }
 
 document.getElementById('tabs').addEventListener('click', (e) => {
@@ -830,6 +1308,10 @@ document.getElementById('markAll').addEventListener('click', refreshMarks);
 document.getElementById('minEdge').value = state.minEdgePts;
 document.getElementById('edgeSort').value = state.sortBy;
 document.getElementById('bothSides').checked = state.bothSides;
+fpiFrom = todayMT();
+fpiTo = addDays(fpiFrom, FPI_WINDOW_DAYS);
+syncFpiControls();
+wireFpi();
 renderBank();
 renderPositions();
 showTab('edges');
