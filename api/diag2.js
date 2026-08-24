@@ -1,60 +1,39 @@
-// GET /api/diag2 - compact probe of odds + Kalshi availability from the Vercel runtime.
-const J = async (url, headers = {}) => {
-  const t0 = Date.now();
-  try {
-    const r = await fetch(url, { headers: { Accept: 'application/json', ...headers }, signal: AbortSignal.timeout(9000) });
-    const txt = await r.text();
-    let j = null; try { j = JSON.parse(txt); } catch {}
-    return { status: r.status, ms: Date.now() - t0, bytes: txt.length, json: j, snippet: txt.slice(0, 160) };
-  } catch (e) { return { status: 'ERR', ms: Date.now() - t0, error: e.message }; }
+// GET /api/diag2 - discovers Kalshi sports series and one sample game market.
+const KB = 'https://api.elections.kalshi.com/trade-api/v2';
+const J = async (u) => {
+  const r = await fetch(u, { headers: { Accept: 'application/json' }, signal: AbortSignal.timeout(15000) });
+  return { status: r.status, json: await r.json().catch(() => null) };
 };
 
 export default async function handler(req, res) {
   const out = {};
+  const want = /NFL|NBA|NHL|NCAAF|NCAAB|CBB|CFB|SUPERBOWL|MARCHMAD/i;
 
-  // 1. Does ESPN expose odds on the scoreboard for future games?
-  for (const [k, url] of Object.entries({
-    nfl_wk1: 'https://site.api.espn.com/apis/site/v2/sports/football/nfl/scoreboard?dates=20260913&limit=5',
-    cfb_sep5: 'https://site.api.espn.com/apis/site/v2/sports/football/college-football/scoreboard?dates=20260905&groups=80&limit=5',
-  })) {
-    const r = await J(url);
-    const ev = r.json?.events?.[0];
-    const comp = ev?.competitions?.[0];
-    out[k] = {
-      status: r.status,
-      event: ev?.shortName,
-      hasOdds: Boolean(comp?.odds?.length),
-      oddsSample: comp?.odds?.[0] ? {
-        provider: comp.odds[0].provider?.name,
-        details: comp.odds[0].details,
-        overUnder: comp.odds[0].overUnder,
-        spread: comp.odds[0].spread,
-        homeML: comp.odds[0].homeTeamOdds?.moneyLine,
-        awayML: comp.odds[0].awayTeamOdds?.moneyLine,
-        homeFav: comp.odds[0].homeTeamOdds?.favorite,
-      } : null,
-      keys: comp?.odds?.[0] ? Object.keys(comp.odds[0]) : null,
+  const s = await J(`${KB}/series?category=Sports`);
+  const all = s.json?.series || [];
+  out.totalSeries = all.length;
+  out.matching = all
+    .filter((x) => want.test(x.ticker))
+    .map((x) => ({ t: x.ticker, title: (x.title || '').slice(0, 70) }))
+    .slice(0, 90);
+
+  // For a few likely game-level series, show open events + a sample market.
+  const probe = (req.query.probe || 'KXNFLGAME,KXNBAGAME,KXNHLGAME,KXNCAAFGAME,KXNCAABGAME').split(',');
+  out.probe = {};
+  for (const t of probe) {
+    const e = await J(`${KB}/events?series_ticker=${t}&status=open&limit=3&with_nested_markets=true`);
+    const ev = e.json?.events?.[0];
+    out.probe[t] = {
+      status: e.status,
+      nEvents: e.json?.events?.length ?? 0,
+      sampleEvent: ev ? { ticker: ev.event_ticker, title: ev.title, sub: ev.sub_title } : null,
+      sampleMarkets: (ev?.markets || []).slice(0, 3).map((m) => ({
+        ticker: m.ticker, yes_sub: m.yes_sub_title, no_sub: m.no_sub_title,
+        yes_bid: m.yes_bid, yes_ask: m.yes_ask, last: m.last_price,
+        vol: m.volume, oi: m.open_interest, close: m.close_time, rules: (m.rules_primary || '').slice(0, 80),
+      })),
     };
   }
-
-  // 2. ESPN dedicated odds endpoint (core API)
-  const core = await J('https://sports.core.api.espn.com/v2/sports/football/leagues/nfl/events/401872930/competitions/401872930/odds');
-  out.espn_core_odds = { status: core.status, count: core.json?.count, snippet: core.snippet };
-
-  // 3. Kalshi public market data
-  out.kalshi_series = await J('https://api.elections.kalshi.com/trade-api/v2/series?category=Sports')
-    .then((r) => ({ status: r.status, ms: r.ms, bytes: r.bytes,
-      n: r.json?.series?.length, sample: r.json?.series?.slice(0, 12).map((s) => s.ticker), snippet: r.snippet.slice(0, 120) }));
-
-  out.kalshi_markets = await J('https://api.elections.kalshi.com/trade-api/v2/markets?limit=5&status=open')
-    .then((r) => ({ status: r.status, ms: r.ms, n: r.json?.markets?.length,
-      sample: r.json?.markets?.slice(0, 3).map((m) => ({ t: m.ticker, title: m.title, yes: m.yes_bid, no: m.no_bid, close: m.close_time })),
-      snippet: r.snippet.slice(0, 120) }));
-
-  out.kalshi_events = await J('https://api.elections.kalshi.com/trade-api/v2/events?limit=5&status=open')
-    .then((r) => ({ status: r.status, n: r.json?.events?.length,
-      sample: r.json?.events?.slice(0, 5).map((e) => ({ t: e.event_ticker, title: e.title, series: e.series_ticker })) }));
-
   res.setHeader('Cache-Control', 'no-store');
   res.status(200).json(out);
 }
