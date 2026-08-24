@@ -163,17 +163,27 @@ export default async function handler(req, res) {
         volume: r.mkt.volume,
         source: r.game.fair.source,
       };
-    }).filter(Boolean)
-      .filter((p) => p.netEdgePts >= minEdge * 100 && p.stake > 0)
-      .sort((a, b) => b.netEdgePts - a.netEdgePts);
+    }).filter(Boolean).sort((a, b) => b.netEdgePts - a.netEdgePts);
+
+    // With all=1 the near-misses are kept, which is what tells you whether the
+    // market is efficient or you are simply filtering too hard.
+    const showAll = q.all === '1' || q.all === 'true';
+    const qualifying = picks.filter((x) => x.netEdgePts >= minEdge * 100 && x.stake > 0);
+    const shown = showAll ? picks : qualifying;
 
     res.setHeader('Cache-Control', 'public, s-maxage=120, stale-while-revalidate=600');
     res.status(200).json({
       league, tradeable: true, generatedAt: new Date().toISOString(),
       settings: { bankroll, kellyFraction: frac, maxStakePct: maxStake, fpiWeight: fpiW, role },
       matchedMarkets: rows.length, withFpi: fpi.size,
-      totalStake: Number(picks.reduce((s, p) => s + p.stake, 0).toFixed(2)),
-      picks: picks.slice(0, Number(q.limit) || 25),
+      qualifying: qualifying.length,
+      totalStake: Number(qualifying.reduce((s, p) => s + p.stake, 0).toFixed(2)),
+      edgeSpread: picks.length ? {
+        best: picks[0].netEdgePts, median: picks[Math.floor(picks.length / 2)].netEdgePts,
+        worst: picks[picks.length - 1].netEdgePts,
+        positive: picks.filter((x) => x.netEdgePts > 0).length, of: picks.length,
+      } : null,
+      picks: shown.slice(0, Number(q.limit) || 25),
     });
   } catch (err) {
     res.setHeader('Cache-Control', 'no-store');
