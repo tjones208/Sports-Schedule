@@ -279,8 +279,7 @@ export default async function handler(req, res) {
     const withMarket = rows.filter((r) => r.marketHome != null);
     const homeWins = rows.filter((r) => r.homeWon).length;
 
-    res.setHeader('Cache-Control', 'public, s-maxage=86400');
-    res.status(200).json({
+    const payload = {
       league, start, end, year, weeks, fbsOnly,
       probabilityWindow: (minProb != null || maxProb != null)
         ? { min: minProb == null ? null : minProb * 100, max: maxProb == null ? null : maxProb * 100,
@@ -492,7 +491,33 @@ export default async function handler(req, res) {
         marketHome: r.marketHome == null ? null : Number((r.marketHome * 100).toFixed(1)),
         homeWon: r.homeWon,
       })),
-    });
+    };
+
+    res.setHeader('Cache-Control', 'public, s-maxage=86400');
+
+    // ?brief=1 returns just the headline comparison, for reading several
+    // seasons side by side without the full sweeps.
+    if (q.brief === '1') {
+      const pick = (arr, v) => (arr || []).find((x) => x.spreadPts === v);
+      res.status(200).json({
+        season: year || `${start} to ${end}`,
+        window: payload.probabilityWindow,
+        games: payload.games,
+        fpi: payload.fpi && { accuracy: payload.fpi.accuracy, brier: payload.fpi.brier },
+        market: payload.market && { accuracy: payload.market.accuracy, brier: payload.market.brier },
+        fpiBeatsMarket: payload.fpi && payload.market
+          ? payload.fpi.brier < payload.market.brier : null,
+        atMarket: payload.pnlAtMarket && {
+          kelly0: pick(payload.pnlAtMarket.kelly, 0),
+          kelly2: pick(payload.pnlAtMarket.kelly, 2),
+          flat0: pick(payload.pnlAtMarket.flat, 0),
+        },
+        atFpiPrice: payload.pnl && (payload.pnl.fixed || []).find((x) => x.delta === 0),
+        lines: payload.lines && { matchRate: payload.lines.matchRate, priced: payload.lines.priced },
+      });
+      return;
+    }
+    res.status(200).json(payload);
   } catch (err) {
     res.setHeader('Cache-Control', 'no-store');
     res.status(502).json({ error: err.message });
