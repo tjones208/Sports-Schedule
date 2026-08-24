@@ -250,6 +250,13 @@ export default async function handler(req, res) {
         projectionsOver95: rows.filter((r) => Math.max(r.fpiHome, 1 - r.fpiHome) > 0.95).length,
         shareOver95: Number(((rows.filter((r) => Math.max(r.fpiHome, 1 - r.fpiHome) > 0.95).length / rows.length) * 100).toFixed(1)),
       },
+      // ?raw=1 returns the per-game (favourite probability, did it win) pairs so
+      // a P&L can be simulated against an assumed price. Kalshi does not retain
+      // last season's markets, so the price has to be a stated assumption.
+      raw: q.raw === '1' ? {
+        favProb: rows.map((r) => Number(Math.max(r.fpiHome, 1 - r.fpiHome).toFixed(4))),
+        favWon: rows.map((r) => (((r.fpiHome >= 0.5) === r.homeWon) ? 1 : 0)),
+      } : undefined,
       sample: (q.sample === '0' ? [] : rows.slice(0, 3)).map((r) => ({
         g: `${r.away} ${r.as} @ ${r.home} ${r.hs}`,
         fpiHome: Number((r.fpiHome * 100).toFixed(1)),
