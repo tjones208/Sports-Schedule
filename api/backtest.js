@@ -49,7 +49,7 @@ export default async function handler(req, res) {
 
     // 1. Completed games in the window
     const raw = [];
-    await pool(days, 8, async (d) => {
+    await pool(days, 14, async (d) => {
       try {
         const j = await J(`${SITE}/${L.path}/scoreboard?dates=${d}&${extra}`);
         for (const ev of j.events || []) {
@@ -73,7 +73,7 @@ export default async function handler(req, res) {
 
     // 2. FPI projection per game
     const rows = [];
-    await pool(raw, 8, async (g) => {
+    await pool(raw, 14, async (g) => {
       try {
         const j = await J(`${CORE}/${CORE_PATH[league]}/events/${g.id}/competitions/${g.id}/predictor`);
         const val = (arr) => {
@@ -103,6 +103,9 @@ export default async function handler(req, res) {
       }
       return {
         n: used.length,
+        correct,
+        sumBrier: Number(brier.toFixed(6)),
+        sumLogLoss: Number(logloss.toFixed(6)),
         accuracy: Number(((correct / used.length) * 100).toFixed(2)),
         brier: Number((brier / used.length).toFixed(4)),
         logLoss: Number((logloss / used.length).toFixed(4)),
@@ -122,6 +125,8 @@ export default async function handler(req, res) {
       return {
         band: `${Math.round(lo * 100)}-${Math.round(hi * 100)}%`,
         n: inb.length,
+        hits: hit,
+        sumPred: Number(inb.reduce((s2, r) => s2 + Math.max(r.fpiHome, 1 - r.fpiHome), 0).toFixed(6)),
         predicted: meanPred == null ? null : Number((meanPred * 100).toFixed(1)),
         actual: inb.length ? Number(((hit / inb.length) * 100).toFixed(1)) : null,
         gap: inb.length ? Number((((hit / inb.length) - meanPred) * 100).toFixed(1)) : null,
@@ -139,6 +144,7 @@ export default async function handler(req, res) {
       market: score((r) => r.marketHome),
       marketCoverage: withMarket.length,
       baselineAlwaysHome: {
+        homeWins,
         accuracy: Number(((homeWins / rows.length) * 100).toFixed(2)),
         brier: Number((rows.reduce((s, r) => s + (1 - (r.homeWon ? 1 : 0)) ** 2, 0) / rows.length).toFixed(4)),
       },
@@ -149,7 +155,7 @@ export default async function handler(req, res) {
         projectionsOver95: rows.filter((r) => Math.max(r.fpiHome, 1 - r.fpiHome) > 0.95).length,
         shareOver95: Number(((rows.filter((r) => Math.max(r.fpiHome, 1 - r.fpiHome) > 0.95).length / rows.length) * 100).toFixed(1)),
       },
-      sample: rows.slice(0, 5).map((r) => ({
+      sample: (q.sample === '0' ? [] : rows.slice(0, 3)).map((r) => ({
         g: `${r.away} ${r.as} @ ${r.home} ${r.hs}`,
         fpiHome: Number((r.fpiHome * 100).toFixed(1)),
         marketHome: r.marketHome == null ? null : Number((r.marketHome * 100).toFixed(1)),
