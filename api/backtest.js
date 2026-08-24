@@ -400,6 +400,36 @@ export default async function handler(req, res) {
           };
         };
 
+        // Per-confidence-band P&L at a fair price, fixed size. This is what
+        // answers "is there a range I should not trade": at fair value every
+        // band loses the fee, so what varies is how much miscalibration adds on
+        // top and how heavy the fee is at that price.
+        const bandPnl = (lo, hi, spreadPts = 0) => {
+          let n = 0, wins = 0, expWins = 0, cost = 0, fees = 0, payout = 0;
+          for (const r of rows) {
+            const p = Math.max(r.fpiHome, 1 - r.fpiHome);
+            if (p < lo || p >= hi) continue;
+            const won = ((r.fpiHome >= 0.5) === r.homeWon);
+            const ask = Math.min(99, Math.max(1, p * 100 + spreadPts));
+            const fee = orderFeeDollars(fixedContracts, ask, 'taker');
+            n++; wins += won ? 1 : 0; expWins += p;
+            cost += fixedContracts * (ask / 100); fees += fee;
+            payout += won ? fixedContracts : 0;
+          }
+          const outlay = cost + fees;
+          return { band: `${Math.round(lo * 100)}-${Math.round(hi * 100)}%`, games: n,
+            wins, expectedWins: Number(expWins.toFixed(1)),
+            winsVsExpected: Number((wins - expWins).toFixed(1)),
+            outlay: Number(outlay.toFixed(2)), fees: Number(fees.toFixed(2)),
+            profit: Number((payout - outlay).toFixed(2)),
+            roi: outlay ? Number(((payout - outlay) / outlay * 100).toFixed(2)) : null,
+            profitPerGame: n ? Number(((payout - outlay) / n).toFixed(2)) : null };
+        };
+
+        const coarse = [[0.5, 0.6], [0.6, 0.7], [0.7, 0.8], [0.8, 0.9], [0.9, 1.01]];
+        const fine = [[0.5, 0.55], [0.55, 0.6], [0.6, 0.65], [0.65, 0.7], [0.7, 0.75],
+          [0.75, 0.8], [0.8, 0.85], [0.85, 0.9], [0.9, 0.95], [0.95, 1.01]];
+
         // Sum of FPI's own probabilities: how many wins it expected in total.
         const sumPred = rows.reduce((t, r) => t + Math.max(r.fpiHome, 1 - r.fpiHome), 0);
         const actualWins = rows.filter((r) => ((r.fpiHome >= 0.5) === r.homeWon)).length;
@@ -410,6 +440,15 @@ export default async function handler(req, res) {
           expectedWins: Number(sumPred.toFixed(2)),
           actualWins,
           winsVsExpected: Number((actualWins - sumPred).toFixed(2)),
+          byBand: coarse.map(([lo, hi]) => bandPnl(lo, hi)),
+          byBandFine: fine.map(([lo, hi]) => bandPnl(lo, hi)),
+          // What the season looks like if a band is skipped entirely.
+          excludingBand: coarse.map(([lo, hi]) => {
+            const kept = coarse.filter(([a]) => a !== lo).map(([a, b]) => bandPnl(a, b));
+            return { skipped: `${Math.round(lo * 100)}-${Math.round(hi * 100)}%`,
+              games: kept.reduce((t, x) => t + x.games, 0),
+              profit: Number(kept.reduce((t, x) => t + x.profit, 0).toFixed(2)) };
+          }),
           fixed: deltas.map((d) => run(d, 'fixed')),
           kelly: deltas.map((d) => run(d, 'kelly')),
           flat: deltas.map((d) => run(d, 'flat')),
