@@ -6,6 +6,7 @@
 
 import { LEAGUES } from '../lib/leagues.mjs';
 import { normalizeEvent } from '../lib/normalize.mjs';
+import { fairProbabilityConsensus, extractOdds } from '../lib/odds.mjs';
 import { dateRange } from '../lib/time.mjs';
 import { kellyNet, netEdge, netExpectedValue, orderFeeDollars, breakevenProbability } from '../lib/fees.mjs';
 
@@ -57,8 +58,11 @@ export default async function handler(req, res) {
   const minEdge = (Number(q.minEdge) || 0) / 100;
   const fpiW = Math.min(1, Math.max(0, q.fpi == null ? 0.35 : Number(q.fpi)));
   const role = q.role === 'maker' ? 'maker' : 'taker';
+  // Default to the consensus: a pick must clear its edge under every devig
+  // method, not just the one that happens to flatter it.
   const method = ['multiplicative', 'additive', 'power', 'shin'].includes(q.method)
-    ? q.method : 'multiplicative';
+    ? q.method : 'consensus';
+  const normMethod = method === 'consensus' ? 'multiplicative' : method;
 
   try {
     // 1. Kalshi open markets for this league
@@ -87,7 +91,14 @@ export default async function handler(req, res) {
       try {
         const j = await J(`${SITE}/${L.path}/scoreboard?dates=${d.replace(/-/g, '')}&${extra}`);
         for (const ev of j.events || []) {
-          const g = normalizeEvent(ev, L, 'denver', method);
+          const g = normalizeEvent(ev, L, 'denver', normMethod);
+          if (g && method === 'consensus') {
+            const c = fairProbabilityConsensus(extractOdds(ev.competitions?.[0]), L.id);
+            if (c) {
+              g.fair = { home: c.home, away: c.away, source: c.source, consensus: true };
+              g.methodSpread = Math.max(c.homeSpread, c.awaySpread);
+            }
+          }
           if (g && g.fair) games.push(g);
         }
       } catch { /* skip the day */ }
@@ -164,6 +175,8 @@ export default async function handler(req, res) {
         fee: orderFeeDollars(contracts, r.mkt.ask, role),
         volume: r.mkt.volume,
         source: r.game.fair.source,
+        methodSpread: r.game.methodSpread == null ? null
+          : Number((r.game.methodSpread * 100).toFixed(2)),
       };
     }).filter(Boolean).sort((a, b) => b.netEdgePts - a.netEdgePts);
 

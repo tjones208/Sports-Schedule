@@ -3,7 +3,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
   americanToProb, devig, spreadToProb, kelly, expectedValue,
-  extractOdds, fairProbabilities,
+  extractOdds, fairProbabilities, fairProbabilityConsensus, DEVIG_METHODS,
 } from '../lib/odds.mjs';
 
 const close = (a, b, eps = 1e-4) => Math.abs(a - b) < eps;
@@ -90,4 +90,49 @@ test('fair probabilities prefer moneylines and fall back to the spread', () => {
 
   assert.equal(fairProbabilities({ homeML: null, awayML: null, spread: null }, 'nfl'), null);
   assert.equal(fairProbabilities(null, 'nfl'), null);
+});
+
+
+test('every devig method returns a proper probability pair', () => {
+  for (const m of DEVIG_METHODS) {
+    const d = devig(americanToProb(-320), americanToProb(250), m);
+    assert.ok(close(d.a + d.b, 1, 1e-9), `${m} must sum to 1`);
+    assert.ok(d.a > 0 && d.a < 1 && d.b > 0 && d.b < 1, `${m} must stay inside (0,1)`);
+    assert.ok(d.a > d.b, `${m} must keep the favourite ahead`);
+  }
+});
+
+test('multiplicative devig gives the underdog the most probability', () => {
+  // This is the whole reason a multiplicative-only model favours underdogs:
+  // it assumes margin is proportional to price, so the longshot keeps too much.
+  const raw = [americanToProb(-320), americanToProb(250)];
+  const dog = (m) => devig(raw[0], raw[1], m).b;
+  for (const m of ['additive', 'power', 'shin']) {
+    assert.ok(dog('multiplicative') > dog(m),
+      `multiplicative should credit the underdog more than ${m}`);
+  }
+  // And the gap widens as the game gets more lopsided.
+  const longshot = [americanToProb(-1200), americanToProb(750)];
+  const gapBig = devig(longshot[0], longshot[1], 'multiplicative').b
+    - devig(longshot[0], longshot[1], 'power').b;
+  const gapSmall = dog('multiplicative') - dog('power');
+  assert.ok(gapBig > gapSmall, 'the bias grows with the price of the longshot');
+});
+
+test('methods barely disagree on a coin flip and diverge on a lopsided game', () => {
+  const flip = fairProbabilityConsensus({ homeML: -115, awayML: -105 }, 'nfl');
+  const lopsided = fairProbabilityConsensus({ homeML: -1200, awayML: 750 }, 'nfl');
+  assert.ok(flip.awaySpread < 0.005, 'near 50/50 the method hardly matters');
+  assert.ok(lopsided.awaySpread > 0.02, 'on a longshot the method is worth points');
+  assert.ok(lopsided.awaySpread > flip.awaySpread * 5);
+});
+
+test('consensus takes the most conservative estimate for each side', () => {
+  const c = fairProbabilityConsensus({ homeML: -320, awayML: 250 }, 'nfl');
+  const homes = DEVIG_METHODS.map((m) => c.byMethod[m].home);
+  const aways = DEVIG_METHODS.map((m) => c.byMethod[m].away);
+  assert.ok(close(c.home, Math.min(...homes)));
+  assert.ok(close(c.away, Math.min(...aways)));
+  assert.ok(c.home + c.away < 1, 'being conservative on both sides cannot sum to 1');
+  assert.equal(fairProbabilityConsensus({ homeML: null, awayML: null, spread: null }, 'nfl'), null);
 });
