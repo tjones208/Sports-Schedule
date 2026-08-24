@@ -139,6 +139,11 @@ export default async function handler(req, res) {
     res.setHeader('Cache-Control', 'public, s-maxage=86400');
     res.status(200).json({
       league, start, end, fbsOnly,
+      // Completed games found vs those ESPN still has a projection for. A big
+      // gap would mean the sample is not the season, just the part ESPN kept.
+      gamesFound: raw.length,
+      gamesScored: rows.length,
+      coverage: Number(((rows.length / raw.length) * 100).toFixed(1)),
       games: rows.length,
       fpi: score((r) => r.fpiHome),
       market: score((r) => r.marketHome),
