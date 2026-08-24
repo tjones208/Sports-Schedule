@@ -6,7 +6,7 @@
 
 import { LEAGUES } from '../lib/leagues.mjs';
 import { normalizeEvent } from '../lib/normalize.mjs';
-import { fairProbabilityConsensus, extractOdds } from '../lib/odds.mjs';
+import { fairProbabilityConsensus, extractOdds, fairProbabilities, DEVIG_METHODS } from '../lib/odds.mjs';
 import { dateRange } from '../lib/time.mjs';
 import { kellyNet, netEdge, netExpectedValue, orderFeeDollars, breakevenProbability } from '../lib/fees.mjs';
 
@@ -92,6 +92,7 @@ export default async function handler(req, res) {
         const j = await J(`${SITE}/${L.path}/scoreboard?dates=${d.replace(/-/g, '')}&${extra}`);
         for (const ev of j.events || []) {
           const g = normalizeEvent(ev, L, 'denver', normMethod);
+          if (g) g._odds = extractOdds(ev.competitions?.[0]);
           if (g && method === 'consensus') {
             const c = fairProbabilityConsensus(extractOdds(ev.competitions?.[0]), L.id);
             if (c) {
@@ -177,14 +178,36 @@ export default async function handler(req, res) {
         source: r.game.fair.source,
         methodSpread: r.game.methodSpread == null ? null
           : Number((r.game.methodSpread * 100).toFixed(2)),
+        // What each devig assumption would have said about this exact contract,
+        // so a pick that only works under one of them is obvious.
+        methods: (() => {
+          if (!r.game._odds) return null;
+          const out = {};
+          for (const m of DEVIG_METHODS) {
+            const f = fairProbabilities(r.game._odds, league, m);
+            if (!f) continue;
+            const p = r.side === 'home' ? f.home : f.away;
+            out[m] = {
+              fair: Number((p * 100).toFixed(2)),
+              netEdge: Number((netEdge(p, r.mkt.ask, role) * 100).toFixed(2)),
+            };
+          }
+          return Object.keys(out).length ? out : null;
+        })(),
       };
     }).filter(Boolean).sort((a, b) => b.netEdgePts - a.netEdgePts);
+
+    // ?q= narrows to one matchup, for explaining a single pick.
+    const needle = String(q.q || '').trim().toLowerCase();
+    const searched = needle
+      ? picks.filter((x) => `${x.game} ${x.pick} ${x.ticker}`.toLowerCase().includes(needle))
+      : picks;
 
     // With all=1 the near-misses are kept, which is what tells you whether the
     // market is efficient or you are simply filtering too hard.
     const showAll = q.all === '1' || q.all === 'true';
-    const qualifying = picks.filter((x) => x.netEdgePts >= minEdge * 100 && x.stake > 0);
-    const shown = showAll ? picks : qualifying;
+    const qualifying = searched.filter((x) => x.netEdgePts >= minEdge * 100 && x.stake > 0);
+    const shown = showAll ? searched : qualifying;
 
     res.setHeader('Cache-Control', 'public, s-maxage=120, stale-while-revalidate=600');
     res.status(200).json({
