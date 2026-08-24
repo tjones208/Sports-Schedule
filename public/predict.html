@@ -66,6 +66,22 @@
         <span>pts</span>
       </label>
       <label class="toggle"><input type="checkbox" id="onlyEdges" checked> Only +EV</label>
+      <label class="toggle" for="edgeFrom">From
+        <input type="date" id="edgeFrom" aria-label="Only games on or after this date">
+      </label>
+      <label class="toggle" for="edgeTo">To
+        <input type="date" id="edgeTo" aria-label="Only games on or before this date">
+      </label>
+      <button class="btn" id="edgeWeek" type="button">Next 7 days</button>
+      <label class="toggle" for="edgeSort">Sort
+        <select id="edgeSort" aria-label="Sort order">
+          <option value="edge">Best edge</option>
+          <option value="date">Game date</option>
+          <option value="stake">Largest stake</option>
+          <option value="price">Cheapest price</option>
+        </select>
+      </label>
+      <button class="btn" id="edgeClear" type="button">Clear dates</button>
       <span class="spacer"></span>
       <button class="btn" id="refresh" type="button">Refresh markets</button>
     </div>

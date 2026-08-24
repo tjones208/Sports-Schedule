@@ -17,6 +17,7 @@ const DEFAULTS = {
   minEdgePts: 3,
   feeRole: 'taker',      // you are usually crossing the spread to hit an ask
   fpiWeight: 0.35,       // how much the ESPN model counts in the blend
+  sortBy: 'edge',        // edge | date | stake | price
   positions: [],
 };
 
@@ -44,6 +45,8 @@ let kalshiEvents = []; // open Kalshi events for that league
 let matched = [];      // joined rows
 let fpiCache = new Map(); // ESPN FPI projections by raw event id
 let tab = 'edges';
+let dateFrom = '';
+let dateTo = '';
 
 /* ---------- storage ---------- */
 
@@ -68,6 +71,16 @@ const pct = (n, d = 1) => `${(n * 100).toFixed(d)}%`;
 const pts = (n) => `${n >= 0 ? '+' : ''}${(n * 100).toFixed(1)}`;
 const cents = (c) => (c == null ? '--'
   : `${Number.isInteger(Number(c)) ? c : Number(c).toFixed(1)}\u00A2`);
+function todayMT() {
+  return new Intl.DateTimeFormat('en-CA', {
+    timeZone: 'America/Denver', year: 'numeric', month: '2-digit', day: '2-digit',
+  }).format(new Date());
+}
+function addDays(iso, n) {
+  const [y, m, d] = iso.split('-').map(Number);
+  const dt = new Date(Date.UTC(y, m - 1, d + n));
+  return dt.toISOString().slice(0, 10);
+}
 const uid = () => `p${Date.now().toString(36)}${Math.floor(Math.random() * 1e6).toString(36)}`;
 
 function toast(msg) {
@@ -330,11 +343,26 @@ function renderEdges() {
   const onlyEdges = document.getElementById('onlyEdges').checked;
 
   let rows = matched;
+  if (dateFrom) rows = rows.filter((r) => r.game.date >= dateFrom);
+  if (dateTo) rows = rows.filter((r) => r.game.date <= dateTo);
   if (onlyEdges) rows = rows.filter((r) => r.quoted && r.edge >= minEdge && r.netEv > 0);
 
+  // Unquoted rows have no edge, price or stake to sort on, so they sink.
+  const last = (v) => (v == null ? Number.NEGATIVE_INFINITY : v);
+  const byDate = (a, b) => a.game.date.localeCompare(b.game.date)
+    || (a.game.sortKey ?? 0) - (b.game.sortKey ?? 0)
+    || last(b.edge) - last(a.edge);
+  rows = rows.slice().sort(
+    state.sortBy === 'date' ? byDate
+      : state.sortBy === 'stake' ? ((a, b) => b.stakeDollars - a.stakeDollars || byDate(a, b))
+        : state.sortBy === 'price' ? ((a, b) => (a.ask ?? 999) - (b.ask ?? 999) || byDate(a, b))
+          : ((a, b) => last(b.edge) - last(a.edge) || byDate(a, b)),
+  );
+
   if (!rows.length) {
+    const ranged = dateFrom || dateTo;
     el.innerHTML = `<div class="empty">
-      <h3>No qualifying edges</h3>
+      <h3>No qualifying edges${ranged ? ' in that date range' : ''}</h3>
       <p>${matched.length
         ? (matched.some((r) => r.quoted)
           ? `${matched.length} market${matched.length === 1 ? '' : 's'} matched, but none clear a ${state.minEdgePts}-point edge. Lower the threshold or untick <em>Only +EV</em> to see them all.`
@@ -379,6 +407,9 @@ function renderEdges() {
       </tr>`;
     }).join('')}
   </tbody></table></div>
+  ${dateFrom || dateTo ? `<p class="fineprint">Showing games${
+    dateFrom ? ` from <strong>${esc(dateFrom)}</strong>` : ''}${
+    dateTo ? ` to <strong>${esc(dateTo)}</strong>` : ''} &mdash; ${rows.length} of ${matched.length} markets.</p>` : ''}
   <p class="fineprint"><strong>Book</strong> is the sportsbook line with the vig removed.
   <strong>ESPN FPI</strong> is ESPN's own model, independent of the betting line.
   <strong>Blend</strong> weights them ${pct(1 - state.fpiWeight, 0)}/${pct(state.fpiWeight, 0)} and is what
@@ -754,6 +785,24 @@ document.getElementById('minEdge').addEventListener('change', (e) => {
   state.minEdgePts = Number(e.target.value) || 0; save(); renderEdges();
 });
 document.getElementById('onlyEdges').addEventListener('change', renderEdges);
+document.getElementById('edgeFrom').addEventListener('change', (e) => { dateFrom = e.target.value; renderEdges(); });
+document.getElementById('edgeTo').addEventListener('change', (e) => { dateTo = e.target.value; renderEdges(); });
+document.getElementById('edgeSort').addEventListener('change', (e) => {
+  state.sortBy = e.target.value; save(); renderEdges();
+});
+document.getElementById('edgeWeek').addEventListener('click', () => {
+  dateFrom = todayMT();
+  dateTo = addDays(dateFrom, 7);
+  document.getElementById('edgeFrom').value = dateFrom;
+  document.getElementById('edgeTo').value = dateTo;
+  renderEdges();
+});
+document.getElementById('edgeClear').addEventListener('click', () => {
+  dateFrom = ''; dateTo = '';
+  document.getElementById('edgeFrom').value = '';
+  document.getElementById('edgeTo').value = '';
+  renderEdges();
+});
 document.getElementById('refresh').addEventListener('click', () => loadLeague(document.getElementById('edgeLeague').value));
 document.getElementById('addManual').addEventListener('click', () => openLog(null));
 document.getElementById('showSettled').addEventListener('change', renderPositions);
@@ -762,6 +811,7 @@ document.getElementById('markAll').addEventListener('click', refreshMarks);
 /* ---------- boot ---------- */
 
 document.getElementById('minEdge').value = state.minEdgePts;
+document.getElementById('edgeSort').value = state.sortBy;
 renderBank();
 renderPositions();
 showTab('edges');
