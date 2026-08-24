@@ -445,6 +445,13 @@ dialog menu { display: flex; gap: 8px; justify-content: flex-end; padding: 14px 
   border: 1px solid var(--up); font-weight: 600;
 }
 .passchip { color: var(--ink-faint); border: 1px solid var(--rule); }
+.callout {
+  background: var(--card); border: 1px solid var(--rule);
+  border-left: 3px solid var(--tally);
+  padding: 11px 14px; margin: 0 0 14px;
+  font-size: 12.5px; line-height: 1.55; color: var(--ink-faint); max-width: 88ch;
+}
+.callout strong { color: var(--ink); }
 .lgchip {
   color: var(--ink-faint); border: 1px solid var(--rule);
   padding: 1px 4px; margin-right: 4px; font-size: 9.5px;

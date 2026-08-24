@@ -473,6 +473,11 @@ const ALL_LEAGUES = ['nfl', 'ncaaf', 'nba', 'nhl', 'ncaab'];
 const FPI_WINDOW_DAYS = 14;
 const FPI_MAX_IDS_PER_LEAGUE = 240;
 
+// Only college football has been backtested. Every other sport runs the same
+// rule on a calibration that was never measured for it, and the tab has to say
+// so wherever the CFB numbers appear next to a non-CFB row.
+const CALIBRATED_LEAGUES = new Set(['ncaaf']);
+
 // Pooled 2023-2025 FBS requirement by FPI band, and the worst single season.
 // Shown as a reference so you can set the discount per band rather than flat.
 const BAND_REFERENCE = [
@@ -698,6 +703,11 @@ function renderFpi() {
 
   document.getElementById('fpiCount').textContent = triggers.length ? String(triggers.length) : '';
 
+  const untested = [...new Set(rows.map((r) => r.league))]
+    .filter((l) => !CALIBRATED_LEAGUES.has(l))
+    .map((l) => LEAGUE_LABEL[l] || l);
+  const untestedRows = rows.filter((r) => !CALIBRATED_LEAGUES.has(r.league)).length;
+
   const ruleLine = state.fpiAddFee
     ? `ask &le; FPI &minus; (fee + ${state.fpiDiscountPts} pts)`
     : `ask &le; FPI &minus; ${state.fpiDiscountPts} pts`;
@@ -766,7 +776,16 @@ function renderFpi() {
     }).join('')}
   </tbody></table></div>`;
 
-  el.innerHTML = `${summary}${body}
+  const untestedNote = untested.length ? `<div class="callout">
+    <strong>${untestedRows} of ${rows.length} rows are on a sport with no backtest behind it.</strong>
+    The discount was measured on FBS college football. ${esc(untested.join(', '))}
+    ${untested.length === 1 ? 'is' : 'are'} running the same rule on a calibration that was never
+    fitted for ${untested.length === 1 ? 'it' : 'them'}. The fee half of the requirement carries over
+    unchanged &mdash; it is the same 7% x price x (1 - price) everywhere &mdash; but the model-error
+    half is unmeasured, and there is no reason to assume ESPN misses by the same amount in every
+    sport. Treat these as unpriced until they are tested.</div>` : '';
+
+  el.innerHTML = `${summary}${untestedNote}${body}
 
   <p class="fineprint"><strong>The rule on this tab is ${ruleLine}.</strong>
   <strong>Target</strong> is the highest price you should pay for that side.
@@ -787,6 +806,11 @@ function renderFpi() {
   season would have to be 7.8. Use the table below to set the discount for the band you are
   actually trading, and treat NFL, NBA, NHL and college basketball rows as untested &mdash; no
   equivalent backtest has been run on them.</p>
+  ${state.fpiLeague !== 'all' && !CALIBRATED_LEAGUES.has(state.fpiLeague)
+    ? `<p class="fineprint"><strong>You are filtered to ${esc(LEAGUE_LABEL[state.fpiLeague])}. Every
+       number in the table below is college football.</strong> It is shown because the fee column
+       still applies and the shape of the argument still holds, not because it describes
+       ${esc(LEAGUE_LABEL[state.fpiLeague])}.</p>` : ''}
   <div class="tablewrap"><table class="tbl">
     <thead><tr><th>FPI band</th><th class="r">Games</th><th class="r">Pooled need</th>
       <th class="r">Worst season</th><th class="r">Fee share</th><th></th></tr></thead>
