@@ -12,7 +12,7 @@
 import { LEAGUES } from '../lib/leagues.mjs';
 import { normalizeEvent } from '../lib/normalize.mjs';
 import { kellyNet, orderFeeDollars, feePerContractCents, breakevenProbability } from '../lib/fees.mjs';
-import { getFbsTeamIds, isFbsMatchup } from '../lib/divisions.mjs';
+import { getFbsTeamIds, isFbsMatchup, lastError as fbsError } from '../lib/divisions.mjs';
 
 const SITE = 'https://site.api.espn.com/apis/site/v2/sports';
 const CORE = 'https://sports.core.api.espn.com/v2/sports';
@@ -188,6 +188,10 @@ export default async function handler(req, res) {
     res.status(200).json({
       league, date, strategy: 'ESPN FPI favourite in every game',
       fbsOnly: league === 'ncaaf' && q.fbs !== '0',
+      fbsRosterSize: fbsIds ? fbsIds.size : null,
+      fbsSample: fbsIds ? [...fbsIds].slice(0, 5) : null,
+      fbsError,
+      rawGamesBeforeFilter: (sj.events || []).length,
       settings: { bankroll, kellyFraction: frac, maxStakePct: maxStake, flatStake: flat, role },
       gamesOnDate: games.length,
       kalshiEventsOnDate: events.length,
