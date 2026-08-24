@@ -46,11 +46,6 @@ export default async function handler(req, res) {
   const weeks = String(q.weeks || '').split(',').map((w) => w.trim()).filter((w) => /^\d+$/.test(w));
   const seasonType = /^[123]$/.test(q.seasontype || '') ? q.seasontype : '2';
 
-  if (!start && !(year && weeks.length)) {
-    res.status(400).json({ error: 'Pass ?start=YYYY-MM-DD[&end=] or ?year=2025&weeks=1,2,3[&seasontype=2]' });
-    return;
-  }
-
   // ?probe=YYYYMMDD reports how many events come back at various limits, to
   // find where ESPN's cap actually bites.
   if (q.probe) {
@@ -67,6 +62,11 @@ export default async function handler(req, res) {
     } catch { /* ignore */ }
     res.setHeader('Cache-Control', 'no-store');
     res.status(200).json({ probe: q.probe, events: out });
+    return;
+  }
+
+  if (!start && !(year && weeks.length)) {
+    res.status(400).json({ error: 'Pass ?start=YYYY-MM-DD[&end=] or ?year=2025&weeks=1,2,3[&seasontype=2]' });
     return;
   }
 
