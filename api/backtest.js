@@ -376,7 +376,7 @@ export default async function handler(req, res) {
         const cap = Number(q.maxStake) || 0.05;
         const flat = Number(q.flat) || 25;
         const fixedContracts = Number(q.contracts) || 100;
-        const deltas = [-8, -6, -5, -4, -3, -2, -1, 0, 1, 2];
+        const deltas = [-10, -8, -7, -6, -5, -4, -3, -2, -1, 0];
 
         const run = (delta, mode) => {
           let staked = 0, fees = 0, profit = 0, bets = 0, wins = 0, contractsTotal = 0;
@@ -513,6 +513,9 @@ export default async function handler(req, res) {
           flat0: pick(payload.pnlAtMarket.flat, 0),
         },
         atFpiPrice: payload.pnl && (payload.pnl.fixed || []).find((x) => x.delta === 0),
+        // How the result moves as Kalshi prices below FPI, in probability points.
+        discountSweep: payload.pnl && (payload.pnl.fixed || []).map((x) => ({
+          discountPts: -x.delta, profit: x.profit, roi: x.roi, tStat: x.tStat })),
         lines: payload.lines && { matchRate: payload.lines.matchRate, priced: payload.lines.priced },
       });
       return;
