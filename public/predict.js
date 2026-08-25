@@ -1030,6 +1030,7 @@ async function btLoadSeason(league, year, range = 'full', { force = false } = {}
   let done = 0;
   const collected = [];
   const failures = [];
+  const diag = { found: 0, scored: 0, completed: 0 };
 
   btStatus(`<h3>Loading ${esc(LEAGUE_LABEL[league])} ${esc(label)}</h3>
     <p>0 of ${chunks.length} requests &middot; 0 games. Every finished game needs its own
@@ -1046,6 +1047,11 @@ async function btLoadSeason(league, year, range = 'full', { force = false } = {}
       try {
         const j = await getJSON(`/api/backtest?${q}&dataset=1&sample=0`);
         if (Array.isArray(j.dataset)) collected.push(...j.dataset);
+        // Counted even when the chunk scored nothing: the gap between games
+        // found and games scored is what tells us why a season came back empty.
+        diag.found += j.gamesFound || 0;
+        diag.scored += j.gamesScored || 0;
+        diag.completed += j.completedGamesOnScoreboard || 0;
       } catch (err) {
         failures.push(err.message);
       }
@@ -1070,12 +1076,38 @@ async function btLoadSeason(league, year, range = 'full', { force = false } = {}
   });
 
   if (!dataset.length) {
+    // Name the stage that actually failed. "Nothing came back" can mean four
+    // different things and they need four different responses.
+    const probeDate = new URLSearchParams(chunks[Math.floor(chunks.length / 2)]).get('start')
+      || `${year}-12-15`;
+    const diagUrl = `/api/diag?league=${league}&date=${probeDate}`;
+    let why;
+    if (failures.length === chunks.length) {
+      why = `<strong>Every one of the ${chunks.length} requests failed.</strong> First error:
+        <code>${esc(failures[0])}</code>. That is the deployment or the upstream, not the data.`;
+    } else if (diag.completed && !diag.found) {
+      why = `<strong>ESPN listed ${diag.completed} finished games, but none survived filtering.</strong>
+        Games are dropped when a score is missing or the result was a tie.`;
+    } else if (diag.found && !diag.scored) {
+      why = `<strong>ESPN listed ${diag.found} finished games, but has no pregame projection for any
+        of them.</strong> That is the answer: this sport and season cannot be backtested against FPI,
+        because the projections are what the whole thing compares to. Try a more recent season &mdash;
+        ESPN drops them over time.`;
+    } else if (!diag.completed) {
+      why = `<strong>ESPN listed no finished games at all</strong> for this date range. Either the
+        season window is wrong or it has not been played yet.`;
+    } else {
+      why = `ESPN found ${diag.completed} finished games, ${diag.found} usable,
+        ${diag.scored} with a projection &mdash; but none reached this page.`;
+    }
     document.getElementById('btOut').innerHTML = `<div class="empty">
-      <h3>Nothing came back</h3>
-      <p>${failures.length
-        ? `All ${chunks.length} requests failed. First error: ${esc(failures[0])}.`
-        : `ESPN returned no finished games with a projection for ${esc(LEAGUE_LABEL[league])} ${esc(label)}. `
-          + 'Older seasons are more likely to have had their projections dropped.'}</p></div>`;
+      <h3>Nothing came back for ${esc(LEAGUE_LABEL[league])} ${esc(label)}</h3>
+      <p>${why}</p>
+      <p class="fineprint">${failures.length && failures.length < chunks.length
+        ? `${failures.length} of ${chunks.length} requests also failed (${esc(failures[0])}). ` : ''}
+        To see exactly what ESPN returns for one date, open
+        <a href="${diagUrl}" target="_blank" rel="noopener"><code>${esc(diagUrl)}</code></a>
+        &mdash; it reports each stage separately and says which one broke.</p></div>`;
     return;
   }
 
@@ -1085,6 +1117,7 @@ async function btLoadSeason(league, year, range = 'full', { force = false } = {}
     savedAt: new Date().toISOString(),
     requests: chunks.length,
     failed: failures.length,
+    diag,
   };
   const stored = btCacheWrite(league, year, range, payload);
   btData = { league, year, range, ...payload, stored };
@@ -1326,7 +1359,9 @@ async function renderBacktest() {
   the discount is paying for. This runs on every game in the band, not just the ones bet, so it
   does not move when you change the price settings.</p>
 
-  <p class="fineprint">Loaded ${new Date(btData.savedAt).toLocaleString()}${
+  <p class="fineprint">${btData.diag && btData.diag.found > dataset.length
+    ? `ESPN listed ${btData.diag.found} finished games and had a projection for ${btData.diag.scored}
+       &mdash; ${btData.diag.found - btData.diag.scored} were dropped for having none. ` : ''}Loaded ${new Date(btData.savedAt).toLocaleString()}${
     btData.stored === false ? ' &mdash; too large to cache in this browser, so it will reload next time'
       : ' &middot; cached in this browser'}${
     btData.failed ? ` &middot; ${btData.failed} of ${btData.requests} requests failed, so the season may be partial` : ''}.</p>`;

@@ -230,8 +230,6 @@ export default async function handler(req, res) {
       rows.push(...keep);
     }
 
-    if (!rows.length) { res.status(200).json({ league, start, end, games: 0, note: 'no completed games with a projection' }); return; }
-
     // ?dataset=1 returns one compact record per game and nothing else.
     //
     // This is what the Backtest tab pulls. Every derived number - bands, the
@@ -256,11 +254,18 @@ export default async function handler(req, res) {
           o: favIsHome ? r.away : r.home,
         };
       });
-      res.setHeader('Cache-Control', 'public, s-maxage=86400');
+      // Cache a productive answer, but never a zero - an empty result is
+      // usually transient upstream trouble and should not stick for a day.
+      res.setHeader('Cache-Control', dataset.length
+        ? 'public, s-maxage=86400' : 'no-store');
       res.status(200).json({
         league, start, end, year, weeks, fbsOnly,
         gamesFound: raw.length,
         gamesScored: rows.length,
+        // Why games dropped out, so an empty result is self-diagnosing:
+        // completed games ESPN listed, how many survived filtering, and how
+        // many of those still had a pregame projection attached.
+        droppedNoProjection: raw.length - rows.length,
         withMarket: dataset.filter((g) => g.m != null).length,
         completedGamesOnScoreboard: completedAll,
         lines: lineJoin && { matchRate: lineJoin.matchRate, priced: lineJoin.priced,
@@ -269,6 +274,8 @@ export default async function handler(req, res) {
       });
       return;
     }
+
+    if (!rows.length) { res.status(200).json({ league, start, end, games: 0, note: 'no completed games with a projection' }); return; }
 
     // 3. Score it
     const score = (probOf) => {
