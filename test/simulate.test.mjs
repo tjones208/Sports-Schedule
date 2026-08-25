@@ -7,6 +7,7 @@ import * as fees from '../lib/fees.mjs';
 import {
   simulate, priceFor, requiredPts, calibrate, discountSweep,
   breakEvenDiscount, maxDrawdown, feePerContractCents, orderFeeDollars,
+  seasonChunks, addDays,
 } from '../public/simulate.mjs';
 
 const close = (a, b, eps = 1e-9) => assert.ok(Math.abs(a - b) < eps,
@@ -172,4 +173,81 @@ test('a higher bar in market mode can only remove bets, never add them', () => {
     assert.ok(sweep[i].taken <= sweep[i - 1].taken,
       `bets should not increase from ${sweep[i - 1].discountPts} to ${sweep[i].discountPts} pts`);
   }
+});
+
+/* ---------- season planning ---------- */
+
+test('a season number arriving as a string still produces valid dates', () => {
+  // The season <select> hands back a string. `${'2024' + 1}` is "20241", which
+  // yields the date "20241-04-15" and an Invalid time value further down. This
+  // is the bug that only ever showed on the date-swept sports.
+  for (const league of ['nba', 'nhl', 'ncaab']) {
+    const chunks = seasonChunks(league, '2024');
+    assert.ok(chunks.length > 0, `${league} produced no chunks`);
+    for (const q of chunks) {
+      const u = new URLSearchParams(q);
+      for (const k of ['start', 'end']) {
+        const v = u.get(k);
+        assert.match(v, /^\d{4}-\d{2}-\d{2}$/, `${league} ${k} malformed: ${v}`);
+        assert.ok(Number.isFinite(Date.parse(`${v}T12:00:00Z`)), `${league} ${k} unparseable: ${v}`);
+      }
+      assert.ok(u.get('start') <= u.get('end'), 'start must not follow end');
+    }
+  }
+});
+
+test('date-swept seasons cross the new year and stay in order', () => {
+  const chunks = seasonChunks('nba', 2024);
+  const first = new URLSearchParams(chunks[0]);
+  const last = new URLSearchParams(chunks[chunks.length - 1]);
+  assert.equal(first.get('start'), '2024-10-15');
+  assert.ok(last.get('end') <= '2025-04-15', 'must not run past the window');
+  assert.ok(last.get('end') > '2025-01-01', 'must reach into the new year');
+  for (let i = 1; i < chunks.length; i++) {
+    const prev = new URLSearchParams(chunks[i - 1]).get('end');
+    const cur = new URLSearchParams(chunks[i]).get('start');
+    assert.ok(cur > prev, `chunk ${i} overlaps or repeats: ${prev} then ${cur}`);
+  }
+});
+
+test('week-swept seasons cover every week exactly once', () => {
+  for (const [league, total] of [['ncaaf', 15], ['nfl', 18]]) {
+    const seen = [];
+    for (const q of seasonChunks(league, 2024)) {
+      seen.push(...new URLSearchParams(q).get('weeks').split(',').map(Number));
+    }
+    assert.deepEqual(seen, Array.from({ length: total }, (_, i) => i + 1),
+      `${league} weeks should be 1..${total} with no gaps or repeats`);
+  }
+});
+
+test('probe and half cover the opening of the season and nothing beyond it', () => {
+  // Not a string prefix: in weeks mode a 2-week probe asks for "weeks=1,2"
+  // where the full season's first chunk is "weeks=1,2,3". What has to hold is
+  // that the ground each one covers is an opening slice of the full season.
+  const covered = (chunks) => {
+    const out = new Set();
+    for (const q of chunks) {
+      const u = new URLSearchParams(q);
+      if (u.get('weeks')) u.get('weeks').split(',').forEach((w) => out.add(`w${w}`));
+      else for (let d = u.get('start'); d <= u.get('end'); d = addDays(d, 1)) out.add(d);
+    }
+    return out;
+  };
+
+  for (const league of ['ncaaf', 'nfl', 'nba', 'nhl', 'ncaab']) {
+    const full = covered(seasonChunks(league, 2024));
+    const half = covered(seasonChunks(league, 2024, 'half'));
+    const probe = covered(seasonChunks(league, 2024, 'probe'));
+
+    assert.ok(probe.size > 0 && probe.size < half.size && half.size < full.size,
+      `${league}: probe ${probe.size} < half ${half.size} < full ${full.size}`);
+    for (const k of probe) assert.ok(half.has(k), `${league}: probe covers ${k}, half does not`);
+    for (const k of half) assert.ok(full.has(k), `${league}: half covers ${k}, full does not`);
+  }
+});
+
+test('an unknown league or a non-year season is refused, not silently mangled', () => {
+  assert.throws(() => seasonChunks('mlb', 2024), /unknown league/);
+  assert.throws(() => seasonChunks('nba', 'last year'), /must be a year/);
 });

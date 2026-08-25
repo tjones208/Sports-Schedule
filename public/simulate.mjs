@@ -238,3 +238,73 @@ export function breakEvenDiscount(games, opts, lo = -20, hi = 40) {
   }
   return (a + b) / 2;
 }
+
+
+/* ---------- season planning ----------
+
+   Which requests cover a season, per sport. Pure, so test/simulate.test.mjs can
+   check the windows rather than discovering a bad date the slow way: `year`
+   arrives from a <select> as a string, and `${year + 1}` on a string silently
+   produces "20251" instead of 2025.                                          */
+
+export const SEASON_PLAN = {
+  ncaaf: { mode: 'weeks', weeks: 15, chunk: 3, seasontype: '2',
+    label: (y) => `${y}` },
+  nfl: { mode: 'weeks', weeks: 18, chunk: 5, seasontype: '2',
+    label: (y) => `${y}` },
+  nba: { mode: 'dates', from: (y) => `${y}-10-15`, to: (y) => `${y + 1}-04-15`, chunk: 7,
+    label: (y) => `${y}-${String((y + 1) % 100).padStart(2, '0')}` },
+  nhl: { mode: 'dates', from: (y) => `${y}-10-01`, to: (y) => `${y + 1}-04-18`, chunk: 7,
+    label: (y) => `${y}-${String((y + 1) % 100).padStart(2, '0')}` },
+  // Division I plays ~44 games a day and well over 100 on a Saturday, so this
+  // window is deliberately short - a wider one puts more projection lookups in
+  // a single request than the 60s function limit can finish.
+  ncaab: { mode: 'dates', from: (y) => `${y}-11-01`, to: (y) => `${y + 1}-03-15`, chunk: 2,
+    label: (y) => `${y}-${String((y + 1) % 100).padStart(2, '0')}` },
+};
+
+export function addDays(iso, n) {
+  const [y, m, d] = iso.split('-').map(Number);
+  return new Date(Date.UTC(y, m - 1, d + n)).toISOString().slice(0, 10);
+}
+
+/**
+ * The /api/backtest query strings that together cover a season.
+ *
+ * `range` trims the span: 'probe' is a fast look at the opening stretch, which
+ * is the cheapest way to find out whether ESPN still has projections for that
+ * sport and season before waiting out a full load.
+ */
+export function seasonChunks(league, year, range = 'full') {
+  const plan = SEASON_PLAN[league];
+  if (!plan) throw new Error(`unknown league: ${league}`);
+  const y = Number(year);
+  if (!Number.isInteger(y)) throw new Error(`season must be a year, got ${year}`);
+  const out = [];
+
+  if (plan.mode === 'weeks') {
+    const weeks = range === 'probe' ? Math.min(2, plan.weeks)
+      : range === 'half' ? Math.ceil(plan.weeks / 2) : plan.weeks;
+    for (let w = 1; w <= weeks; w += plan.chunk) {
+      const list = [];
+      for (let k = w; k < w + plan.chunk && k <= weeks; k++) list.push(k);
+      out.push(`league=${league}&year=${y}&weeks=${list.join(',')}&seasontype=${plan.seasontype}`);
+    }
+    return out;
+  }
+
+  const first = plan.from(y);
+  const full = plan.to(y);
+  const days = Math.round(
+    (Date.parse(`${full}T12:00:00Z`) - Date.parse(`${first}T12:00:00Z`)) / 86400000);
+  const last = range === 'probe' ? addDays(first, Math.min(13, days))
+    : range === 'half' ? addDays(first, Math.floor(days / 2)) : full;
+
+  let cur = first;
+  while (cur <= last) {
+    const end = addDays(cur, plan.chunk - 1);
+    out.push(`league=${league}&start=${cur}&end=${end > last ? last : end}`);
+    cur = addDays(cur, plan.chunk);
+  }
+  return out;
+}

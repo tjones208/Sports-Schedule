@@ -947,18 +947,6 @@ function wireFpi() {
    The simulation itself lives in public/simulate.mjs so that the Node tests in
    test/simulate.test.mjs exercise the exact code the page runs.             */
 
-// How a season is walked. Football has real week numbers and the core API
-// paginates them properly; the other sports have to be swept by date.
-const BT_PLAN = {
-  ncaaf: { mode: 'weeks', weeks: 15, chunk: 3, seasontype: '2', label: (y) => `${y}` },
-  nfl: { mode: 'weeks', weeks: 18, chunk: 5, seasontype: '2', label: (y) => `${y}` },
-  nba: { mode: 'dates', from: (y) => `${y}-10-15`, to: (y) => `${y + 1}-04-15`, chunk: 7,
-    label: (y) => `${y}-${String((y + 1) % 100).padStart(2, '0')}` },
-  nhl: { mode: 'dates', from: (y) => `${y}-10-01`, to: (y) => `${y + 1}-04-18`, chunk: 7,
-    label: (y) => `${y}-${String((y + 1) % 100).padStart(2, '0')}` },
-  ncaab: { mode: 'dates', from: (y) => `${y}-11-01`, to: (y) => `${y + 1}-03-15`, chunk: 5,
-    label: (y) => `${y}-${String((y + 1) % 100).padStart(2, '0')}` },
-};
 const BT_SEASONS = [2025, 2024, 2023, 2022, 2021];
 const BT_CACHE_PREFIX = 'ss:bt:';
 const BT_DEFAULTS = {
@@ -966,30 +954,35 @@ const BT_DEFAULTS = {
   contracts: 100, role: 'taker', priceMode: 'fpi', spreadPts: 0,
 };
 
-let Sim = null;              // lazily imported public/simulate.mjs
+let Sim = null;              // public/simulate.mjs, imported on first use
+let BT_PLAN = null;          // SEASON_PLAN from that module
 let btData = null;           // { league, year, dataset, withMarket, ... }
 let btOpts = { ...BT_DEFAULTS };
 let btRunToken = 0;          // cancels a load when the user starts another
 
 async function loadSim() {
-  if (!Sim) Sim = await import('./simulate.mjs');
+  if (!Sim) {
+    Sim = await import('./simulate.mjs');
+    BT_PLAN = Sim.SEASON_PLAN;
+  }
   return Sim;
 }
 
 /* ---------- season cache ---------- */
 
-const btKey = (league, year) => `${BT_CACHE_PREFIX}${league}:${year}`;
+const btKey = (league, year, range) =>
+  `${BT_CACHE_PREFIX}${league}:${year}${range && range !== 'full' ? `:${range}` : ''}`;
 
-function btCacheRead(league, year) {
+function btCacheRead(league, year, range) {
   try {
-    const raw = localStorage.getItem(btKey(league, year));
+    const raw = localStorage.getItem(btKey(league, year, range));
     if (!raw) return null;
     const j = JSON.parse(raw);
     return Array.isArray(j.dataset) ? j : null;
   } catch { return null; }
 }
-function btCacheWrite(league, year, payload) {
-  try { localStorage.setItem(btKey(league, year), JSON.stringify(payload)); return true; }
+function btCacheWrite(league, year, range, payload) {
+  try { localStorage.setItem(btKey(league, year, range), JSON.stringify(payload)); return true; }
   catch { return false; }   // a full quota is not worth failing the load over
 }
 function btCacheClear() {
@@ -1016,44 +1009,23 @@ function btCachedSeasons() {
 
 /* ---------- loading ---------- */
 
-/** The list of /api/backtest requests that together cover one season. */
-function btChunks(league, year) {
-  const plan = BT_PLAN[league];
-  const out = [];
-  if (plan.mode === 'weeks') {
-    for (let w = 1; w <= plan.weeks; w += plan.chunk) {
-      const list = [];
-      for (let k = w; k < w + plan.chunk && k <= plan.weeks; k++) list.push(k);
-      out.push(`league=${league}&year=${year}&weeks=${list.join(',')}&seasontype=${plan.seasontype}`);
-    }
-    return out;
-  }
-  let cur = plan.from(year);
-  const last = plan.to(year);
-  while (cur <= last) {
-    const end = addDays(cur, plan.chunk - 1);
-    out.push(`league=${league}&start=${cur}&end=${end > last ? last : end}`);
-    cur = addDays(cur, plan.chunk);
-  }
-  return out;
-}
-
 function btStatus(html) {
   const el = document.getElementById('btOut');
   const bar = el.querySelector('#btProgress');
   if (bar) bar.innerHTML = html; else el.innerHTML = `<div class="empty" id="btProgress">${html}</div>`;
 }
 
-async function btLoadSeason(league, year, { force = false } = {}) {
+async function btLoadSeason(league, year, range = 'full', { force = false } = {}) {
   const token = ++btRunToken;
-  const cached = force ? null : btCacheRead(league, year);
+  const cached = force ? null : btCacheRead(league, year, range);
   if (cached) {
-    btData = { league, year, ...cached };
+    btData = { league, year, range, ...cached };
     await renderBacktest();
     return;
   }
 
-  const chunks = btChunks(league, year);
+  const S = await loadSim();
+  const chunks = S.seasonChunks(league, year, range);
   const label = BT_PLAN[league].label(Number(year));
   let done = 0;
   const collected = [];
@@ -1061,7 +1033,9 @@ async function btLoadSeason(league, year, { force = false } = {}) {
 
   btStatus(`<h3>Loading ${esc(LEAGUE_LABEL[league])} ${esc(label)}</h3>
     <p>0 of ${chunks.length} requests &middot; 0 games. Every finished game needs its own
-    ESPN projection lookup, so a full season takes a while. It is cached afterwards.</p>`);
+    ESPN projection lookup, so this takes a while &mdash; roughly ${
+      Math.max(1, Math.round(chunks.length / 3 * 0.35))}&ndash;${
+      Math.max(1, Math.round(chunks.length / 3 * 0.9))} minutes. It is cached afterwards.</p>`);
 
   // Three at a time: enough to keep it moving, gentle enough not to get throttled.
   let idx = 0;
@@ -1112,8 +1086,8 @@ async function btLoadSeason(league, year, { force = false } = {}) {
     requests: chunks.length,
     failed: failures.length,
   };
-  const stored = btCacheWrite(league, year, payload);
-  btData = { league, year, ...payload, stored };
+  const stored = btCacheWrite(league, year, range, payload);
+  btData = { league, year, range, ...payload, stored };
   await renderBacktest();
 }
 
@@ -1285,7 +1259,10 @@ async function renderBacktest() {
       r.skippedTooRich ? `${r.skippedTooRich} were priced too richly.` : ''}</p></div>`}
 
   <p class="fineprint"><strong>${esc(LEAGUE_LABEL[league])} ${esc(label)}</strong> &mdash;
-  ${dataset.length} finished games with an ESPN projection, ${withMarket} with a closing line.
+  ${dataset.length} finished games with an ESPN projection, ${withMarket} with a closing line${
+    btData.range && btData.range !== 'full'
+      ? `, covering the <strong>${btData.range === 'probe' ? 'first two weeks' : 'first half'}</strong> of the season only`
+      : ''}.
   ${esc(modeLine)} Fees are Kalshi's ${opts.role} schedule at ${opts.contracts} contracts a game.
   <strong>Break-even discount</strong> is solved numerically: the number of points below FPI at which
   this configuration returns exactly zero. <strong>t-statistic</strong> asks whether the profit is
@@ -1382,7 +1359,8 @@ function syncBtControls() {
   if (f) f.checked = btOpts.addFee;
 }
 
-function btFillSeasons() {
+async function btFillSeasons() {
+  await loadSim();
   const league = document.getElementById('btLeague').value;
   const sel = document.getElementById('btSeason');
   const keep = sel.value;
@@ -1394,8 +1372,8 @@ function btFillSeasons() {
 function wireBacktest() {
   btFillSeasons();
 
-  document.getElementById('btLeague').addEventListener('change', () => {
-    btFillSeasons();
+  document.getElementById('btLeague').addEventListener('change', async () => {
+    await btFillSeasons();
     btData = null;
     renderBacktest();
   });
@@ -1405,7 +1383,12 @@ function wireBacktest() {
   });
   document.getElementById('btLoad').addEventListener('click', () => {
     btLoadSeason(document.getElementById('btLeague').value,
-      document.getElementById('btSeason').value);
+      document.getElementById('btSeason').value,
+      document.getElementById('btRange').value);
+  });
+  document.getElementById('btRange').addEventListener('change', () => {
+    btData = null;
+    renderBacktest();
   });
 
   const num = (id, key, lo, hi) => document.getElementById(id).addEventListener('change', (e) => {

@@ -286,11 +286,33 @@ carried most of the pooled profit.
 #### How a season is fetched
 
 Football is walked by week through the core API, which paginates properly. Basketball and
-hockey are swept by date in short windows, because the site scoreboard silently caps at 25
-events per request no matter what `limit` says. Requests run three at a time with a
-progress count, results are deduped on date-plus-matchup at the seams, and the finished
-season is cached in localStorage - so loading it is slow once and instant afterwards.
-*Export data* writes the dataset out as JSON, and *Clear cached seasons* drops it.
+hockey are swept day by day, because the site scoreboard silently caps at 25 events per
+request no matter what `limit` says; the client groups those days into windows sized so one
+serverless call finishes inside its 60-second limit. College basketball uses the shortest
+window of all - Division I plays ~44 games a day and well over 100 on a Saturday, and every
+one of them needs its own projection lookup.
+
+| Sport | Full season | Games | Window |
+|---|---|---|---|
+| College football | 5 requests | ~800 | 3 weeks |
+| NFL | 4 requests | ~285 | 5 weeks |
+| NBA | 27 requests | ~1,230 | 7 days |
+| NHL | 29 requests | ~1,310 | 7 days |
+| College basketball | 68 requests | ~5,700 | 2 days |
+
+The **range** control trims that: *Quick probe* loads the opening two weeks, *First half*
+loads half the season. Probe first - it is the cheapest way to find out whether ESPN still
+has projections for that sport and season before waiting out a full load.
+
+Requests run three at a time with a progress count, results are deduped on date-plus-matchup
+at the seams, and each range is cached separately in localStorage - so loading is slow once
+and instant afterwards. *Export data* writes the dataset out as JSON, and *Clear cached
+seasons* drops it.
+
+Season windows and chunking live in `public/simulate.mjs` as `seasonChunks`, under test.
+They are pure and easy to get subtly wrong: the season arrives from a `<select>` as a
+string, and `${'2024' + 1}` is `"20241"`, which silently yields the date `20241-04-15` on
+exactly the sports that span a new year.
 
 Older seasons are more likely to have had their projections dropped by ESPN, so a season
 that returns nothing is usually that rather than a fault.

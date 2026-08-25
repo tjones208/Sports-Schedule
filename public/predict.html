@@ -150,7 +150,12 @@
         <option value="ncaab">College Basketball</option>
       </select>
       <select id="btSeason" aria-label="Season"></select>
-      <button class="btn primary" id="btLoad" type="button">Load season</button>
+      <select id="btRange" aria-label="How much of the season to load">
+        <option value="probe">Quick probe (first 2 weeks)</option>
+        <option value="half">First half</option>
+        <option value="full" selected>Full season</option>
+      </select>
+      <button class="btn primary" id="btLoad" type="button">Load</button>
       <span class="spacer"></span>
       <button class="btn" id="btExport" type="button">Export data</button>
       <button class="btn" id="btForget" type="button">Clear cached seasons</button>
