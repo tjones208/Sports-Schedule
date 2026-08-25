@@ -7,7 +7,7 @@ import * as fees from '../lib/fees.mjs';
 import {
   simulate, priceFor, requiredPts, calibrate, discountSweep,
   breakEvenDiscount, maxDrawdown, feePerContractCents, orderFeeDollars,
-  seasonChunks, addDays,
+  seasonChunks, addDays, modelName, modelLabel,
 } from '../public/simulate.mjs';
 
 const close = (a, b, eps = 1e-9) => assert.ok(Math.abs(a - b) < eps,
@@ -250,4 +250,26 @@ test('probe and half cover the opening of the season and nothing beyond it', () 
 test('an unknown league or a non-year season is refused, not silently mangled', () => {
   assert.throws(() => seasonChunks('mlb', 2024), /unknown league/);
   assert.throws(() => seasonChunks('nba', 'last year'), /must be a year/);
+});
+
+/* ---------- model naming ---------- */
+
+test('each sport is named for the model ESPN actually runs', () => {
+  assert.equal(modelName('nfl'), 'FPI');      // Football Power Index
+  assert.equal(modelName('ncaaf'), 'FPI');
+  assert.equal(modelName('nba'), 'BPI');      // Basketball Power Index
+  assert.equal(modelName('ncaab'), 'BPI');
+  // ESPN publishes no branded power index for hockey, so it is not given one.
+  assert.equal(modelName('nhl'), 'ESPN model');
+  assert.equal(modelName('mlb'), 'ESPN model');
+});
+
+test('a mixed view names every branded model it contains', () => {
+  assert.equal(modelLabel(['nba', 'ncaab']), 'BPI');
+  assert.equal(modelLabel(['nfl', 'ncaaf']), 'FPI');
+  assert.equal(modelLabel(['nfl', 'nba']), 'BPI/FPI');
+  assert.equal(modelLabel(['nfl', 'nba', 'nhl']), 'BPI/FPI');
+  // Hockey alone has nothing branded to fall back on.
+  assert.equal(modelLabel(['nhl']), 'ESPN model');
+  assert.equal(modelLabel([]), 'ESPN model');
 });

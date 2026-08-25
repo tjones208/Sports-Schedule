@@ -36,6 +36,32 @@ export function orderFeeDollars(contracts, priceCents, role = 'taker') {
 
 export const BANDS = [[50, 60], [60, 70], [70, 80], [80, 90], [90, 100]];
 
+/* ---------- what ESPN calls its model, per sport ----------
+
+   One endpoint serves the pregame win probability for every sport, but the
+   model behind it is branded differently and calling all of it "FPI" is simply
+   wrong outside football. Hockey gets no branded index from ESPN, so it is
+   named for what it is rather than given an invented acronym.               */
+
+export const MODEL_NAME = {
+  nfl: 'FPI',          // Football Power Index
+  ncaaf: 'FPI',
+  nba: 'BPI',          // Basketball Power Index
+  ncaab: 'BPI',
+  nhl: 'ESPN model',   // ESPN publishes no branded power index for hockey
+};
+
+export const modelName = (league) => MODEL_NAME[league] || 'ESPN model';
+
+/** A heading for a view that may mix sports: 'FPI', 'BPI', or 'FPI/BPI'. */
+export function modelLabel(leagues) {
+  const names = [...new Set((leagues || []).map(modelName))];
+  if (!names.length) return 'ESPN model';
+  if (names.length === 1) return names[0];
+  const branded = names.filter((n) => n !== 'ESPN model');
+  return branded.length ? branded.sort().join('/') : 'ESPN model';
+}
+
 export const DEFAULT_OPTIONS = {
   discountPts: 5,
   addFee: false,

@@ -28,16 +28,49 @@ const statVal = (stats, name) => {
   return typeof s?.value === 'number' ? s.value : null;
 };
 
+/**
+ * The pregame win probability, whatever this sport happens to call it.
+ *
+ * One endpoint serves every sport, but the model behind it differs - FPI for
+ * football, BPI for basketball - and the statistic name is not guaranteed to be
+ * identical across them. `gameProjection` is the documented one and is tried
+ * first; anything else that plainly reads as a win projection is accepted after
+ * it, and the name actually used is reported so a mismatch shows up as a label
+ * rather than as an empty tab.
+ *
+ * Scale differs too: gameProjection is a percentage (74.2), while a fallback
+ * could be a fraction. Only the known field is divided unconditionally.
+ */
+const PROJECTION_FIELDS = ['gameProjection', 'gameWinProbability', 'winProbability'];
+
+function projection(stats) {
+  const list = stats || [];
+  for (const want of PROJECTION_FIELDS) {
+    const hit = list.find((x) => (x.name || '').toLowerCase() === want.toLowerCase());
+    if (hit && typeof hit.value === 'number') {
+      const p = want === 'gameProjection' ? hit.value / 100
+        : (hit.value > 1 ? hit.value / 100 : hit.value);
+      return { p: Math.min(1, Math.max(0, p)), stat: hit.name };
+    }
+  }
+  const loose = list.find((x) => /projection|winprob/i.test(x.name || '')
+    && typeof x.value === 'number');
+  if (!loose) return null;
+  return { p: Math.min(1, Math.max(0, loose.value > 1 ? loose.value / 100 : loose.value)),
+    stat: loose.name };
+}
+
 async function forEvent(path, id) {
   const j = await getJSON(`${CORE}/${path}/events/${id}/competitions/${id}/predictor`);
-  const home = statVal(j?.homeTeam?.statistics, 'gameProjection');
-  const away = statVal(j?.awayTeam?.statistics, 'gameProjection');
-  if (home == null && away == null) return null;
+  const home = projection(j?.homeTeam?.statistics);
+  const away = projection(j?.awayTeam?.statistics);
+  if (!home && !away) return null;
 
   return {
     id,
-    homeWin: home == null ? null : home / 100,
-    awayWin: away == null ? null : away / 100,
+    statUsed: (home || away).stat,
+    homeWin: home ? home.p : null,
+    awayWin: away ? away.p : null,
     tie: statVal(j?.homeTeam?.statistics, 'teamChanceTie'),
     // positive means the home team is projected to win by this many points
     predPointDiff: statVal(j?.homeTeam?.statistics, 'teamPredPtDiff'),
@@ -89,6 +122,7 @@ export default async function handler(req, res) {
     source: 'ESPN FPI matchup predictor',
     requested: list.length,
     returned: found.length,
+    statsUsed: [...new Set(found.map((p) => p.statUsed).filter(Boolean))],
     predictions: Object.fromEntries(found.map((p) => [p.id, p])),
   });
 }

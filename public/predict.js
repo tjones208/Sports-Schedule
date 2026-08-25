@@ -59,7 +59,7 @@ let state = load();
 let games = [];        // ESPN games for the selected league
 let kalshiEvents = []; // open Kalshi events for that league
 let matched = [];      // joined rows
-let fpiCache = new Map(); // ESPN FPI projections by raw event id
+let fpiCache = new Map(); // ESPN projections by raw event id (FPI, BPI, per sport)
 let tab = 'edges';
 let dateFrom = '';
 let dateTo = '';
@@ -367,6 +367,7 @@ function restNote(g) {
 
 function renderEdges() {
   const el = document.getElementById('edges');
+  const metric = MODEL.name(document.getElementById('edgeLeague').value);
   const minEdge = state.minEdgePts / 100;
   const onlyEdges = document.getElementById('onlyEdges').checked;
 
@@ -403,7 +404,7 @@ function renderEdges() {
   el.innerHTML = `<div class="tablewrap"><table class="tbl">
     <thead><tr>
       <th>Game</th><th>Pick</th>
-      <th class="r">Book</th><th class="r">ESPN FPI</th><th class="r">Blend</th>
+      <th class="r">Book</th><th class="r">ESPN ${esc(metric)}</th><th class="r">Blend</th>
       <th class="r">Kalshi ask</th><th class="r">Net edge</th><th class="r">Net EV</th>
       <th class="r">Stake</th><th></th>
     </tr></thead><tbody>
@@ -421,7 +422,7 @@ function renderEdges() {
           ${r.disagree != null && r.disagree >= 0.08
             ? `<div class="g-meta"><span class="warnchip">models differ ${pts(r.disagree)}</span></div>` : ''}</td>
         <td class="r mono" data-label="Book">${pct(r.fair, 1)}</td>
-        <td class="r mono" data-label="ESPN FPI">${r.fpi == null ? '<span class="pending">--</span>' : pct(r.fpi, 1)}</td>
+        <td class="r mono" data-label="ESPN ${esc(metric)}">${r.fpi == null ? '<span class="pending">--</span>' : pct(r.fpi, 1)}</td>
         <td class="r mono" data-label="Blend"><strong>${pct(r.blend, 1)}</strong></td>
         <td class="r mono" data-label="Kalshi ask">${r.quoted ? cents(r.ask) : '<span class="pending">no book</span>'}</td>
         <td class="r mono" data-label="Net edge" data-tone="${!r.quoted ? '' : r.edge > 0 ? 'up' : 'down'}">${
@@ -439,7 +440,8 @@ function renderEdges() {
     dateFrom ? ` from <strong>${esc(dateFrom)}</strong>` : ''}${
     dateTo ? ` to <strong>${esc(dateTo)}</strong>` : ''} &mdash; ${rows.length} of ${matched.length} markets.</p>` : ''}
   <p class="fineprint"><strong>Book</strong> is the sportsbook line with the vig removed.
-  <strong>ESPN FPI</strong> is ESPN's own model, independent of the betting line.
+  <strong>ESPN ${esc(metric)}</strong> is ESPN's own model, independent of the betting line
+  &mdash; the Football Power Index for football, the Basketball Power Index for basketball.
   <strong>Blend</strong> weights them ${pct(1 - state.fpiWeight, 0)}/${pct(state.fpiWeight, 0)} and is what
   the edge and stake are computed from. <strong>Net edge</strong> and <strong>Net EV</strong> are
   after Kalshi's ${state.feeRole} fee, which peaks at 1.75&cent; per contract near 50&cent; -
@@ -507,7 +509,8 @@ async function loadFpiUniverse() {
   const to = fpiTo || addDays(from, FPI_WINDOW_DAYS);
   const el = document.getElementById('fpiOut');
   el.innerHTML = `<div class="empty"><h3>Loading every sport</h3>
-    <p>Pulling schedules, Kalshi order books and ESPN FPI projections for
+    <p>Pulling schedules, Kalshi order books and ESPN projections (FPI for football,
+    BPI for basketball) for
     <strong>${esc(from)}</strong> to <strong>${esc(to)}</strong> across NFL, college football,
     NBA, NHL and college basketball. This is five sports at once, so give it a few seconds.</p></div>`;
 
@@ -680,9 +683,18 @@ function fpiLoadNote() {
     if (d.kalshiError) return `${label}: Kalshi failed (${esc(d.kalshiError)})`;
     if (d.noGames) return `${label}: no games in range`;
     if (!d.events) return `${label}: no open Kalshi events`;
-    return `${label}: ${d.withFpi}/${d.matched} matched games with a projection`;
+    return `${label}: ${d.withFpi}/${d.matched} matched games with an ESPN ${MODEL.name(d.league)}`;
   });
   return parts.join(' &middot; ');
+}
+
+/**
+ * Sports whose games matched a Kalshi market but came back with no projection
+ * at all. Without this the sport simply vanishes from the table, which reads as
+ * "no games today" rather than "the model did not answer for this sport".
+ */
+function fpiMissingModels() {
+  return fpiDiag.filter((d) => d.matched > 0 && d.withFpi === 0);
 }
 
 function renderFpi() {
@@ -703,19 +715,22 @@ function renderFpi() {
 
   document.getElementById('fpiCount').textContent = triggers.length ? String(triggers.length) : '';
 
+  const shownLeagues = [...new Set(rows.map((r) => r.league))];
+  const metric = MODEL.label(shownLeagues.length ? shownLeagues : [state.fpiLeague]);
+
   const untested = [...new Set(rows.map((r) => r.league))]
     .filter((l) => !CALIBRATED_LEAGUES.has(l))
     .map((l) => LEAGUE_LABEL[l] || l);
   const untestedRows = rows.filter((r) => !CALIBRATED_LEAGUES.has(r.league)).length;
 
   const ruleLine = state.fpiAddFee
-    ? `ask &le; FPI &minus; (fee + ${state.fpiDiscountPts} pts)`
-    : `ask &le; FPI &minus; ${state.fpiDiscountPts} pts`;
+    ? `ask &le; ${esc(metric)} &minus; (fee + ${state.fpiDiscountPts} pts)`
+    : `ask &le; ${esc(metric)} &minus; ${state.fpiDiscountPts} pts`;
 
   const summary = `<div class="summary">
     <div class="stat"><span class="n">${triggers.length}</span><span class="k">Triggers</span></div>
     <div class="stat"><span class="n">${rows.length}</span><span class="k">Games shown</span></div>
-    <div class="stat"><span class="n">${avgGap == null ? '--' : avgGap.toFixed(1)}</span><span class="k">Avg pts below FPI</span></div>
+    <div class="stat"><span class="n">${avgGap == null ? '--' : avgGap.toFixed(1)}</span><span class="k">Avg pts below ${esc(metric)}</span></div>
     <div class="stat"><span class="n">${money(totalCost)}</span><span class="k">Cost to take all</span></div>
     <div class="stat"><span class="n ${totalEv > 0 ? 'up' : totalEv < 0 ? 'down' : ''}">${money(totalEv)}</span><span class="k">Expected P&amp;L if FPI is right</span></div>
   </div>`;
@@ -729,12 +744,12 @@ function renderFpi() {
       <p>${fpiRows.length
         ? `${fpiRows.length} sides are loaded. Widen the FPI range, lower the discount, untick
            <em>Triggers only</em>, or clear the sport filter.`
-        : 'No Kalshi market lined up with a game that has an ESPN FPI projection in this window. '
+        : 'No Kalshi market lined up with a game that has an ESPN projection in this window. '
           + 'Kalshi opens most game books only in the days before tip-off.'}</p></div>`
     : `<div class="tablewrap"><table class="tbl">
     <thead><tr>
       <th>Game</th><th>Pick</th>
-      <th class="r">ESPN FPI</th><th class="r">Kalshi ask</th><th class="r">Target</th>
+      <th class="r">ESPN ${esc(metric)}</th><th class="r">Kalshi ask</th><th class="r">Target</th>
       <th class="r">Gap</th><th class="r">vs target</th>
       <th>Signal</th><th class="r">Expected P&amp;L</th><th></th>
     </tr></thead><tbody>
@@ -750,7 +765,7 @@ function renderFpi() {
         <td data-label="Pick"><strong>${esc(r.team.short || r.team.name)}</strong>
           <div class="g-meta">${r.side === 'home' ? 'home' : 'away'}${
             r.book == null ? '' : ` &middot; book ${pct(r.book, 0)}`}</div></td>
-        <td class="r mono" data-label="ESPN FPI"><strong>${pct(r.fpi, 1)}</strong></td>
+        <td class="r mono" data-label="ESPN ${esc(metric)}"><strong>${pct(r.fpi, 1)}</strong></td>
         <td class="r mono" data-label="Kalshi ask">${r.quoted ? cents(r.ask)
           : '<span class="pending">no book</span>'}
           ${r.quoted && r.bid != null ? `<div class="g-meta">bid ${cents(r.bid)}</div>` : ''}</td>
@@ -776,6 +791,17 @@ function renderFpi() {
     }).join('')}
   </tbody></table></div>`;
 
+  const missing = fpiMissingModels();
+  const missingNote = missing.length ? `<div class="callout">
+    <strong>ESPN returned no ${esc([...new Set(missing.map((d) => MODEL.name(d.league)))].join(' or '))}
+    projection for ${esc(missing.map((d) => LEAGUE_LABEL[d.league] || d.league).join(', '))}.</strong>
+    ${missing.reduce((n, d) => n + d.matched, 0)} games in ${missing.length === 1 ? 'that sport' : 'those sports'}
+    matched a Kalshi market but carry no model number, so they cannot be scored and are not listed
+    above. To see what ESPN actually returns for one date, open
+    <a href="/api/diag?league=${esc(missing[0].league)}&date=${esc(todayMT())}" target="_blank"
+      rel="noopener"><code>/api/diag?league=${esc(missing[0].league)}&amp;date=${esc(todayMT())}</code></a>
+    &mdash; it reports each stage separately and names the statistics the predictor did return.</div>` : '';
+
   const untestedNote = untested.length ? `<div class="callout">
     <strong>${untestedRows} of ${rows.length} rows are on a sport with no backtest behind it.</strong>
     The discount was measured on FBS college football. ${esc(untested.join(', '))}
@@ -785,11 +811,11 @@ function renderFpi() {
     half is unmeasured, and there is no reason to assume ESPN misses by the same amount in every
     sport. Treat these as unpriced until they are tested.</div>` : '';
 
-  el.innerHTML = `${summary}${untestedNote}${body}
+  el.innerHTML = `${summary}${missingNote}${untestedNote}${body}
 
   <p class="fineprint"><strong>The rule on this tab is ${ruleLine}.</strong>
   <strong>Target</strong> is the highest price you should pay for that side.
-  <strong>Gap</strong> is how many points below FPI the ask already sits, and
+  <strong>Gap</strong> is how many points below ${esc(metric)} the ask already sits, and
   <strong>vs target</strong> is what is left after the discount is taken out &mdash; anything
   at or above zero is flagged TRADE. <strong>Expected P&amp;L</strong> assumes FPI is exactly
   right and is net of Kalshi's ${state.feeRole} fee at ${state.fpiContracts} contracts; it is
@@ -967,6 +993,13 @@ async function loadSim() {
   }
   return Sim;
 }
+
+// ESPN brands its pregame model differently per sport - FPI for football, BPI
+// for basketball, nothing in particular for hockey - so the tab has to name the
+// one it is actually showing. Loaded eagerly since the FPI tab renders early.
+let MODEL = { name: () => 'ESPN model', label: () => 'ESPN model' };
+loadSim().then((S) => { MODEL = { name: S.modelName, label: S.modelLabel }; })
+  .catch(() => { /* the fallback label is already correct enough */ });
 
 /* ---------- season cache ---------- */
 
@@ -1632,9 +1665,10 @@ function renderSettings() {
       <span class="hint">Kalshi charges takers 7% of price x (1 - price), peaking at 1.75c per
       contract at 50c. Makers pay a quarter of that. Taker is the honest default if you are
       lifting an offer.</span></label>
-    <label>ESPN FPI weight in the blend
+    <label>ESPN model weight in the blend
       <input type="number" id="setFpi" min="0" max="1" step="0.05" value="${state.fpiWeight}">
-      <span class="hint">0 uses the sportsbook line alone. 0.35 lets ESPN's model pull the
+      <span class="hint">Applies to FPI, BPI, or whichever model covers the sport.
+      0 uses the sportsbook line alone. 0.35 lets ESPN's model pull the
       estimate about a third of the way. The book deserves most of the weight - it has real
       money behind it and moves continuously.</span></label>
     <label>Minimum edge to flag (points)

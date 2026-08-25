@@ -154,10 +154,25 @@ the recommended order.
 A 2-point gross edge at 52c is only 0.25 points net. That is the whole reason this
 column exists.
 
-### Second opinion: ESPN FPI
+### Second opinion: ESPN's own model
 
 `/api/predictor` returns ESPN's own matchup projection, which is built from team ratings
 rather than from the betting line, so it is genuinely independent of the book.
+
+One endpoint serves every sport, but the model behind it is branded differently and the app
+names the one it is actually showing:
+
+| Sport | Model |
+|---|---|
+| NFL, college football | **FPI** - Football Power Index |
+| NBA, college basketball | **BPI** - Basketball Power Index |
+| NHL | ESPN publishes no branded power index for hockey, so it is labelled plainly |
+
+A view mixing sports is headed with what it contains (`BPI/FPI`). The projection is read
+from the `gameProjection` statistic where present, with a tolerant fallback to anything that
+plainly reads as a win projection, since one endpoint covering several models is not a
+guarantee of one field name. `/api/predictor` reports which statistic it used in
+`statsUsed`, and `/api/diag` dumps the full list when nothing matches.
 
 The **Blend** column weights the book and FPI (65/35 by default, adjustable down to
 book-only) and is what edge and stake are computed from. When the two disagree by 8

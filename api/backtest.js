@@ -169,9 +169,18 @@ export default async function handler(req, res) {
     await pool(raw, 14, async (g) => {
       try {
         const j = await J(`${CORE}/${CORE_PATH[league]}/events/${g.id}/competitions/${g.id}/predictor`);
+        // Same tolerance as api/predictor.js: gameProjection is the documented
+        // field, but one endpoint serves every sport and the model behind it
+        // differs (FPI for football, BPI for basketball), so accept anything
+        // that plainly reads as a win projection rather than scoring zero games.
         const val = (arr) => {
-          const s = (arr || []).find((x) => (x.name || '').toLowerCase() === 'gameprojection');
-          return typeof s?.value === 'number' ? s.value / 100 : null;
+          const list = arr || [];
+          const exact = list.find((x) => (x.name || '').toLowerCase() === 'gameprojection');
+          if (exact && typeof exact.value === 'number') return exact.value / 100;
+          const loose = list.find((x) => /projection|winprob/i.test(x.name || '')
+            && typeof x.value === 'number');
+          if (!loose) return null;
+          return Math.min(1, Math.max(0, loose.value > 1 ? loose.value / 100 : loose.value));
         };
         const p = val(j?.homeTeam?.statistics);
         if (p == null) return;
