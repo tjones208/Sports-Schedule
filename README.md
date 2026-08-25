@@ -168,11 +168,24 @@ names the one it is actually showing:
 | NBA, college basketball | **BPI** - Basketball Power Index |
 | NHL | ESPN publishes no branded power index for hockey, so it is labelled plainly |
 
-A view mixing sports is headed with what it contains (`BPI/FPI`). The projection is read
-from the `gameProjection` statistic where present, with a tolerant fallback to anything that
-plainly reads as a win projection, since one endpoint covering several models is not a
-guarantee of one field name. `/api/predictor` reports which statistic it used in
-`statsUsed`, and `/api/diag` dumps the full list when nothing matches.
+A view mixing sports is headed with what it contains (`BPI/FPI`).
+
+**Two ESPN endpoints carry this number, in different shapes, and coverage differs by sport:**
+
+| Endpoint | Shape | Notes |
+|---|---|---|
+| `sports.core.api.espn.com/.../predictor` | `homeTeam.statistics[{name,value}]`, numbers | Well covered for football |
+| `site.api.espn.com/.../summary?event=` | `predictor.homeTeam.gameProjection`, **strings** | Rides along with the box score |
+
+`lib/projection.mjs` tries both rather than assuming one, normalises percentages and
+fractions alike, derives a missing side from its complement or from `teamChanceLoss`, and
+reports which endpoint answered. The backtest reuses the summary it already fetched for the
+box score instead of making a second request for the same number.
+
+`/api/predictor` reports `sources` and `statsUsed`. `/api/diag?league=&date=` probes both
+endpoints side by side and says which answered, dumping the raw field names each returned -
+so a sport ESPN simply does not project is distinguishable from one that labels its
+projection differently.
 
 The **Blend** column weights the book and FPI (65/35 by default, adjustable down to
 book-only) and is what edge and stake are computed from. When the two disagree by 8

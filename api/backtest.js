@@ -14,6 +14,7 @@ import { getFbsTeamIds, isFbsMatchup } from '../lib/divisions.mjs';
 import { extractOdds, fairProbabilityConsensus } from '../lib/odds.mjs';
 import { kellyNet, orderFeeDollars } from '../lib/fees.mjs';
 import { getSeasonLinesAll, normalizeTeam } from '../lib/cfbd.mjs';
+import { fetchProjection, fromSummary } from '../lib/projection.mjs';
 
 const SITE = 'https://site.api.espn.com/apis/site/v2/sports';
 // ESPN silently falls back to 25 events when limit exceeds ~500, so a bigger
@@ -105,6 +106,9 @@ export default async function handler(req, res) {
       const hs = Number(home.score), as = Number(away.score);
       if (!Number.isFinite(hs) || !Number.isFinite(as) || hs === as) return;
       raw.push({
+        // The summary already carries a predictor block for the sports that
+        // publish one; keeping it here saves a second request per game.
+        summaryProjection: fromSummary(sum),
         id: String(id), date: (sum?.header?.competitions?.[0]?.date || '').slice(0, 10),
         home: home.team?.abbreviation, away: away.team?.abbreviation,
         homeName: home.team?.location || home.team?.displayName,
@@ -164,28 +168,27 @@ export default async function handler(req, res) {
       });
     }
 
-    // 2. FPI projection per game
+    // 2. The pregame projection per game - FPI for football, BPI for
+    //    basketball. Two endpoints serve it and coverage differs by sport, so
+    //    lib/projection.mjs tries both rather than assuming one.
     const rows = [];
+    const projSources = new Set();
     await pool(raw, 14, async (g) => {
       try {
-        const j = await J(`${CORE}/${CORE_PATH[league]}/events/${g.id}/competitions/${g.id}/predictor`);
-        // Same tolerance as api/predictor.js: gameProjection is the documented
-        // field, but one endpoint serves every sport and the model behind it
-        // differs (FPI for football, BPI for basketball), so accept anything
-        // that plainly reads as a win projection rather than scoring zero games.
-        const val = (arr) => {
-          const list = arr || [];
-          const exact = list.find((x) => (x.name || '').toLowerCase() === 'gameprojection');
-          if (exact && typeof exact.value === 'number') return exact.value / 100;
-          const loose = list.find((x) => /projection|winprob/i.test(x.name || '')
-            && typeof x.value === 'number');
-          if (!loose) return null;
-          return Math.min(1, Math.max(0, loose.value > 1 ? loose.value / 100 : loose.value));
-        };
-        const p = val(j?.homeTeam?.statistics);
-        if (p == null) return;
+        // Week mode already parsed a projection out of the box-score summary.
+        // Only go back to the network when that came up empty - which is the
+        // case for every date-swept sport, since those never fetch a summary.
+        let hit = g.summaryProjection;
+        if (!hit || hit.homeWin == null) {
+          hit = await fetchProjection({
+            sitePath: L.path, corePath: CORE_PATH[league], id: g.id, fetchJSON: J,
+          });
+        }
+        if (!hit || hit.homeWin == null) return;
+        if (hit.source) projSources.add(hit.source);
         const market = fairProbabilityConsensus(g.odds, league);
-        rows.push({ ...g, fpiHome: p, marketHome: market ? market.home : null });
+        rows.push({ ...g, summaryProjection: undefined,
+          fpiHome: hit.homeWin, marketHome: market ? market.home : null });
       } catch { /* game drops out */ }
     });
 
@@ -276,6 +279,7 @@ export default async function handler(req, res) {
         // many of those still had a pregame projection attached.
         droppedNoProjection: raw.length - rows.length,
         withMarket: dataset.filter((g) => g.m != null).length,
+        projectionSources: [...projSources],
         completedGamesOnScoreboard: completedAll,
         lines: lineJoin && { matchRate: lineJoin.matchRate, priced: lineJoin.priced,
           error: lineJoin.error || undefined },

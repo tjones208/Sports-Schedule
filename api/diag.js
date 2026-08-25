@@ -15,6 +15,7 @@
 // gameProjection, that is where it shows up.
 
 import { LEAGUES } from '../lib/leagues.mjs';
+import { fromSummary, fromCorePredictor } from '../lib/projection.mjs';
 
 const SITE = 'https://site.api.espn.com/apis/site/v2/sports';
 const CORE = 'https://sports.core.api.espn.com/v2/sports';
@@ -72,36 +73,50 @@ export default async function handler(req, res) {
     return;
   }
 
-  // 2. Does the predictor have anything for a finished game?
+  // 2. Both projection endpoints, for a finished game. Coverage differs by
+  //    sport, so the point is to see which one answers - not to assume.
   const id = completed[0].id;
-  const pr = await probe(`${CORE}/${CORE_PATH[league]}/events/${id}/competitions/${id}/predictor`);
-  out.predictor = { eventId: id, url: pr.url, status: pr.status ?? null, error: pr.error };
+  const [pr, sum] = await Promise.all([
+    probe(`${CORE}/${CORE_PATH[league]}/events/${id}/competitions/${id}/predictor`),
+    probe(`${SITE}/${L.path}/summary?event=${id}`),
+  ]);
 
-  if (!pr.ok) {
-    out.verdict = pr.status === 404
-      ? `The predictor endpoint 404s for finished ${league} games, so ESPN has no retained projection to backtest against.`
-      : `The predictor endpoint failed (${pr.status ?? pr.error}).`;
-    res.setHeader('Cache-Control', 'no-store');
-    res.status(200).json(out);
-    return;
+  const coreHit = pr.ok ? fromCorePredictor(pr.json) : null;
+  out.corePredictor = {
+    eventId: id, url: pr.url, status: pr.status ?? null, error: pr.error,
+    parsed: coreHit && { homeWin: coreHit.homeWin, awayWin: coreHit.awayWin, stat: coreHit.stat },
+    // The raw names, so a sport labelling its projection differently is
+    // identifiable rather than merely broken.
+    homeStats: (pr.json?.homeTeam?.statistics || []).map((x) => ({ name: x.name, value: x.value })),
+    topLevelKeys: pr.ok ? Object.keys(pr.json || {}) : null,
+  };
+
+  const sumHit = sum.ok ? fromSummary(sum.json) : null;
+  out.siteSummary = {
+    url: sum.url, status: sum.status ?? null, error: sum.error,
+    hasPredictorBlock: !!sum.json?.predictor,
+    predictorKeys: sum.json?.predictor ? Object.keys(sum.json.predictor) : null,
+    homeTeamFields: sum.json?.predictor?.homeTeam
+      ? Object.entries(sum.json.predictor.homeTeam).map(([k, v]) => ({ name: k, value: v })) : null,
+    parsed: sumHit && { homeWin: sumHit.homeWin, awayWin: sumHit.awayWin, stat: sumHit.stat },
+  };
+
+  const model = league === 'nba' || league === 'ncaab' ? 'BPI'
+    : league === 'nhl' ? 'the ESPN model' : 'FPI';
+
+  if (coreHit && sumHit) {
+    out.verdict = `Both endpoints answer for ${league}. Everything needed is present.`;
+  } else if (coreHit) {
+    out.verdict = `The core predictor answers for ${league}; the site summary carries no usable `
+      + 'predictor block. The app uses the core endpoint here, so this is fine.';
+  } else if (sumHit) {
+    out.verdict = `The core predictor does NOT answer for ${league}, but the site summary does. `
+      + `The app falls back to it, so ${model} should populate.`;
+  } else {
+    out.verdict = `Neither endpoint yields a projection for finished ${league} games. `
+      + `ESPN retains no ${model} number for them, so this sport and date cannot be scored. `
+      + 'Check corePredictor.homeStats and siteSummary.homeTeamFields for what was returned.';
   }
-
-  // 3. It responded - but does it carry the stat the backtest reads?
-  const names = (side) => (pr.json?.[side]?.statistics || []).map((s) => ({
-    name: s.name, value: s.value,
-  }));
-  out.predictor.homeStats = names('homeTeam');
-  out.predictor.awayStats = names('awayTeam');
-  out.predictor.topLevelKeys = Object.keys(pr.json || {});
-
-  const has = (side) => (pr.json?.[side]?.statistics || [])
-    .some((x) => (x.name || '').toLowerCase() === 'gameprojection');
-  out.predictor.hasGameProjection = { home: has('homeTeam'), away: has('awayTeam') };
-
-  out.verdict = out.predictor.hasGameProjection.home
-    ? 'Everything the backtest needs is present for this date.'
-    : 'The predictor responded but carries no gameProjection stat, which is the one the backtest '
-      + 'reads. See homeStats for the names it does return.';
 
   res.setHeader('Cache-Control', 'no-store');
   res.status(200).json(out);

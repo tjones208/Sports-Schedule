@@ -1,12 +1,15 @@
 // GET /api/predictor?league=nfl&ids=401872925,401872926
 //
-// ESPN's FPI projection for specific games. This is a second opinion that is
-// independent of the betting line, so agreement between the two raises
-// confidence and disagreement is a reason to stand down.
+// ESPN's own pregame projection for specific games - FPI for football, BPI for
+// basketball. This is a second opinion independent of the betting line, so
+// agreement between the two raises confidence and disagreement is a reason to
+// stand down.
+//
+// Two ESPN endpoints carry this number in different shapes and coverage differs
+// by sport, so lib/projection.mjs tries both and reports which one answered.
 
 import { LEAGUES } from '../lib/leagues.mjs';
-
-const CORE = 'https://sports.core.api.espn.com/v2/sports';
+import { fetchProjection } from '../lib/projection.mjs';
 
 // core API paths differ from the site API paths used elsewhere
 const CORE_PATH = {
@@ -21,61 +24,6 @@ async function getJSON(url) {
   const r = await fetch(url, { headers: { Accept: 'application/json' }, signal: AbortSignal.timeout(8000) });
   if (!r.ok) throw new Error(`HTTP ${r.status}`);
   return r.json();
-}
-
-const statVal = (stats, name) => {
-  const s = (stats || []).find((x) => (x.name || '').toLowerCase() === name.toLowerCase());
-  return typeof s?.value === 'number' ? s.value : null;
-};
-
-/**
- * The pregame win probability, whatever this sport happens to call it.
- *
- * One endpoint serves every sport, but the model behind it differs - FPI for
- * football, BPI for basketball - and the statistic name is not guaranteed to be
- * identical across them. `gameProjection` is the documented one and is tried
- * first; anything else that plainly reads as a win projection is accepted after
- * it, and the name actually used is reported so a mismatch shows up as a label
- * rather than as an empty tab.
- *
- * Scale differs too: gameProjection is a percentage (74.2), while a fallback
- * could be a fraction. Only the known field is divided unconditionally.
- */
-const PROJECTION_FIELDS = ['gameProjection', 'gameWinProbability', 'winProbability'];
-
-function projection(stats) {
-  const list = stats || [];
-  for (const want of PROJECTION_FIELDS) {
-    const hit = list.find((x) => (x.name || '').toLowerCase() === want.toLowerCase());
-    if (hit && typeof hit.value === 'number') {
-      const p = want === 'gameProjection' ? hit.value / 100
-        : (hit.value > 1 ? hit.value / 100 : hit.value);
-      return { p: Math.min(1, Math.max(0, p)), stat: hit.name };
-    }
-  }
-  const loose = list.find((x) => /projection|winprob/i.test(x.name || '')
-    && typeof x.value === 'number');
-  if (!loose) return null;
-  return { p: Math.min(1, Math.max(0, loose.value > 1 ? loose.value / 100 : loose.value)),
-    stat: loose.name };
-}
-
-async function forEvent(path, id) {
-  const j = await getJSON(`${CORE}/${path}/events/${id}/competitions/${id}/predictor`);
-  const home = projection(j?.homeTeam?.statistics);
-  const away = projection(j?.awayTeam?.statistics);
-  if (!home && !away) return null;
-
-  return {
-    id,
-    statUsed: (home || away).stat,
-    homeWin: home ? home.p : null,
-    awayWin: away ? away.p : null,
-    tie: statVal(j?.homeTeam?.statistics, 'teamChanceTie'),
-    // positive means the home team is projected to win by this many points
-    predPointDiff: statVal(j?.homeTeam?.statistics, 'teamPredPtDiff'),
-    matchupQuality: statVal(j?.homeTeam?.statistics, 'matchupQuality'),
-  };
 }
 
 async function pool(items, limit, worker) {
@@ -112,7 +60,12 @@ export default async function handler(req, res) {
   }
 
   const results = await pool(list, 6, async (id) => {
-    try { return await forEvent(path, id); } catch { return null; }
+    try {
+      const p = await fetchProjection({
+        sitePath: LEAGUES[league].path, corePath: path, id, fetchJSON: getJSON,
+      });
+      return p.homeWin == null && p.awayWin == null ? null : p;
+    } catch { return null; }
   });
 
   const found = results.filter(Boolean);
@@ -122,7 +75,10 @@ export default async function handler(req, res) {
     source: 'ESPN FPI matchup predictor',
     requested: list.length,
     returned: found.length,
-    statsUsed: [...new Set(found.map((p) => p.statUsed).filter(Boolean))],
+    // Which endpoint answered, and under what field name. A sport served by
+    // only one of the two shows up here rather than as a silently empty tab.
+    sources: [...new Set(found.map((p) => p.source).filter(Boolean))],
+    statsUsed: [...new Set(found.map((p) => p.stat).filter(Boolean))],
     predictions: Object.fromEntries(found.map((p) => [p.id, p])),
   });
 }
