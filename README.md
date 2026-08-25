@@ -92,6 +92,28 @@ egress is restricted - use the deployed API in that case.
 - Pages in as you scroll, so full seasons stay responsive
 - Light and dark themes; press `/` to jump to search
 
+### Refreshing
+
+Schedules are cached at Vercel's edge for six hours, which is right for normal browsing and
+wrong on the day a broadcast gets announced. **Refresh** re-pulls with a cache-busting
+parameter, so the function goes back to ESPN rather than replaying the cached response.
+
+It then reports what actually moved rather than just claiming success:
+
+> Refreshed - 3 games gained a network, 1 kickoff moved.
+
+or, when nothing has:
+
+> Refreshed - nothing has changed since the last pull.
+
+Filters, the selected league, and starred teams all survive a refresh. A refresh that fails
+restores the schedule that was already on screen and says so, rather than leaving an empty
+board. The button is hidden in the one-file build, which has no source to re-pull from.
+
+The neighbouring button is **Clear filters** - it resets the six filter controls and nothing
+else. It was called *Reset*, which read as though it might clear starred teams too; it never
+did, and next to a Refresh button the old name was worse.
+
 ### One-file build
 
 ```bash

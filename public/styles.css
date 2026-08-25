@@ -174,6 +174,13 @@ body {
   display: flex; flex-wrap: wrap; gap: 8px; align-items: center;
   padding: 10px 0 12px; border-bottom: 1px solid var(--rule);
 }
+/* The action buttons stay together and wrap as a unit, so a narrow window
+   never orphans one of them on a line of its own. */
+.filters .actions { display: flex; gap: 8px; margin-left: auto; flex-wrap: wrap; }
+@media (max-width: 760px) {
+  .filters .actions { margin-left: 0; width: 100%; }
+  .filters .actions .btn { flex: 1 1 auto; justify-content: center; }
+}
 .field { position: relative; display: flex; align-items: center; }
 .field input[type="search"] {
   font-family: var(--sans); font-size: 14px; color: var(--ink);

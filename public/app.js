@@ -60,8 +60,15 @@ async function loadJSONSafe(url) {
  * Pull every league from the schedule API, calling onLeague as each one lands so
  * the board fills in progressively instead of waiting on the slowest league.
  */
-async function loadFromAPI(onLeague, onStatus) {
-  const meta = await loadJSONSafe('/api/leagues');
+/**
+ * @param bust when true, append a unique query value so Vercel's edge cache is
+ *   bypassed and the function re-pulls from ESPN. /api/schedule is cached for
+ *   six hours, so without this a refresh would return the same response and the
+ *   button would look broken on the exact day a network gets announced.
+ */
+async function loadFromAPI(onLeague, onStatus, bust = false) {
+  const cb = bust ? `&_=${Date.now()}` : '';
+  const meta = await loadJSONSafe(`/api/leagues${bust ? `?_=${Date.now()}` : ''}`);
   const leagues = meta.leagues || [];
   if (leagues.length === 0) throw new Error('no leagues configured');
 
@@ -70,7 +77,7 @@ async function loadFromAPI(onLeague, onStatus) {
 
   const settled = await Promise.allSettled(leagues.map(async (l) => {
     try {
-      const data = await loadJSONSafe(`/api/schedule?league=${encodeURIComponent(l.league)}`);
+      const data = await loadJSONSafe(`/api/schedule?league=${encodeURIComponent(l.league)}${cb}`);
       onLeague(data);
       return data;
     } finally {
@@ -143,7 +150,7 @@ function applyFilters() {
       && !state.favorites.has(teamKey(g.home))
       && !state.favorites.has(teamKey(g.away))) return false;
     if (q) {
-      const hay = `${g.home.name} ${g.away.name} ${g.home.abbrev || ''} ${g.away.abbrev || ''} ${g.networks.join(' ')} ${g.venue.name || ''}`.toLowerCase();
+      const hay = `${g.home.name} ${g.away.name} ${g.home.abbrev || ''} ${g.away.abbrev || ''} ${g.networks.join(' ')} ${g.venue?.name || ''}`.toLowerCase();
       if (!hay.includes(q)) return false;
     }
     return true;
@@ -162,7 +169,7 @@ function gameRow(g) {
     : '<span class="net none">Not announced</span>';
 
   const bits = [`<span class="lchip" data-league="${g.league}">${LEAGUE_LABEL[g.league] || g.league}</span>`];
-  if (g.venue.name) {
+  if (g.venue?.name) {
     const loc = [g.venue.city, g.venue.state].filter(Boolean).join(', ');
     bits.push(`<span>${esc(g.venue.name)}${loc ? ` &middot; ${esc(loc)}` : ''}</span>`);
   }
@@ -311,7 +318,7 @@ function toICS(games) {
     const net = g.networks.length ? g.networks.join(', ') : 'Network not announced';
     lines.push('BEGIN:VEVENT', `UID:${g.id}@sports-schedule`, `DTSTAMP:${stamp}`,
       `DTSTART:${stamp}`, `SUMMARY:${g.away.name} at ${g.home.name} (${LEAGUE_LABEL[g.league] || g.league})`,
-      `DESCRIPTION:${net}`, `LOCATION:${(g.venue.name || '').replace(/,/g, '\\,')}`, 'END:VEVENT');
+      `DESCRIPTION:${net}`, `LOCATION:${(g.venue?.name || '').replace(/,/g, '\\,')}`, 'END:VEVENT');
   }
   lines.push('END:VCALENDAR');
   return lines.join('\r\n');
@@ -373,6 +380,7 @@ function wire() {
     refresh({ tabs: true });
   });
   document.getElementById('ics').addEventListener('click', downloadICS);
+  document.getElementById('refresh').addEventListener('click', refreshLive);
 
   document.getElementById('listings').addEventListener('click', (e) => {
     const star = e.target.closest('.star');
@@ -407,6 +415,105 @@ function setNotice(html, tone) {
   el.innerHTML = html;
 }
 
+/* ---------- refresh ---------- */
+
+/** Enough of each game to notice a change: its broadcast and its kickoff. */
+function snapshotGames() {
+  const m = new Map();
+  for (const g of state.games) {
+    m.set(g.id, { nets: (g.networks || []).slice().sort().join(', '),
+      when: `${g.date} ${g.time}` });
+  }
+  return m;
+}
+
+function diffGames(before) {
+  let gained = 0, dropped = 0, changed = 0, moved = 0, added = 0;
+  const seen = new Set();
+  for (const g of state.games) {
+    seen.add(g.id);
+    const prev = before.get(g.id);
+    const nets = (g.networks || []).slice().sort().join(', ');
+    if (!prev) { added++; continue; }
+    if (!prev.nets && nets) gained++;
+    else if (prev.nets && !nets) dropped++;
+    else if (prev.nets !== nets) changed++;
+    if (prev.when !== `${g.date} ${g.time}`) moved++;
+  }
+  let removed = 0;
+  for (const id of before.keys()) if (!seen.has(id)) removed++;
+  return { gained, dropped, changed, moved, added, removed };
+}
+
+function describeDiff(d) {
+  const n = (c, one, many) => `${c} ${c === 1 ? one : many}`;
+  const parts = [];
+  if (d.gained) parts.push(`<strong>${n(d.gained, 'game', 'games')} gained a network</strong>`);
+  if (d.changed) parts.push(n(d.changed, 'broadcast changed', 'broadcasts changed'));
+  if (d.dropped) parts.push(n(d.dropped, 'game lost its network', 'games lost their network'));
+  if (d.moved) parts.push(n(d.moved, 'kickoff moved', 'kickoffs moved'));
+  if (d.added) parts.push(n(d.added, 'new game', 'new games'));
+  if (d.removed) parts.push(n(d.removed, 'game removed', 'games removed'));
+  return parts.length ? parts.join(', ') : null;
+}
+
+let refreshing = false;
+
+async function refreshLive() {
+  if (refreshing) return;
+  const btn = document.getElementById('refresh');
+  refreshing = true;
+  btn.disabled = true;
+  const label = btn.textContent;
+  btn.textContent = 'Refreshing\u2026';
+
+  const before = snapshotGames();
+  const previous = state.games;
+
+  try {
+    const collected = [];
+    const result = await loadFromAPI(
+      (data) => { collected.push(...(data.games || [])); },
+      (pending) => {
+        if (!pending.size) return;
+        setNotice(`<div>Re-pulling from ESPN &mdash; <strong>${[...pending].join(', ')}</strong>.
+          This asks the source directly rather than reading the cache, so it takes a few seconds.</div>`, 'info');
+      },
+      true,
+    );
+
+    state.games = sortGames(collected);
+    state.isDemo = false;
+    renderLeagueTabs();
+    renderNetworkOptions();
+    refresh();
+
+    document.getElementById('tzname').textContent = result.timezone || 'America/Denver';
+    document.getElementById('generated').textContent =
+      `Live from ESPN \u00b7 refreshed ${new Date(result.generatedAt)
+        .toLocaleString('en-US', { timeZone: 'America/Denver' })} MT`;
+
+    const summary = describeDiff(diffGames(before));
+    const failed = result.failed.length
+      ? ` <strong>${result.failed.join(' and ')}</strong> could not be reloaded, so those are unchanged.`
+      : '';
+    setNotice(`<div>${summary
+      ? `Refreshed &mdash; ${summary}.`
+      : 'Refreshed &mdash; nothing has changed since the last pull.'}${failed}</div>`,
+    summary || failed ? 'warn' : 'info');
+  } catch (err) {
+    // A failed refresh must not throw away a board that was working.
+    state.games = previous;
+    renderLeagueTabs(); renderNetworkOptions(); refresh();
+    setNotice(`<div>Could not refresh (${esc(err.message)}). The schedule below is
+      still the last good copy.</div>`, 'warn');
+  } finally {
+    refreshing = false;
+    btn.disabled = false;
+    btn.textContent = label;
+  }
+}
+
 function sortGames(list) {
   return list.sort(
     (a, b) => a.date.localeCompare(b.date) || a.sortKey - b.sortKey
@@ -425,6 +532,7 @@ function sortGames(list) {
     if (state.isDemo) setNotice(SAMPLE_NOTICE);
     if (d.timezone) document.getElementById('tzname').textContent = d.timezone;
     renderLeagueTabs(); renderNetworkOptions(); refresh();
+    document.getElementById('refresh').hidden = true;   // nothing to re-pull
     return;
   }
 
