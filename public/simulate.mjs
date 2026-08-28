@@ -334,3 +334,104 @@ export function seasonChunks(league, year, range = 'full') {
   }
   return out;
 }
+
+/* ---------- Kalshi <-> ESPN matching ----------
+
+   Pairing an ESPN game with its Kalshi market has been the source of two
+   separate silent failures - a game that does not match simply reads as "not on
+   Kalshi", which is indistinguishable from one that genuinely has no market.
+   It lives here so it can be tested directly.                              */
+
+const MONTHS = ['JAN', 'FEB', 'MAR', 'APR', 'MAY', 'JUN', 'JUL', 'AUG', 'SEP', 'OCT', 'NOV', 'DEC'];
+
+/** KXNFLGAME-26OCT20BOSDET -> { date: '2026-10-20', teams: 'BOSDET' } */
+export function parseEventTicker(ticker) {
+  const m = /-(\d{2})([A-Z]{3})(\d{2})([A-Z0-9]*)$/.exec(ticker || '');
+  if (!m) return null;
+  const month = MONTHS.indexOf(m[2]);
+  if (month < 0) return null;
+  return {
+    date: `20${m[1]}-${String(month + 1).padStart(2, '0')}-${m[3]}`,
+    teams: m[4] || '',
+  };
+}
+
+const norm = (s) => String(s || '').toUpperCase().replace(/[^A-Z]/g, '');
+
+/**
+ * Does this Kalshi event refer to this ESPN game?
+ *
+ * Kalshi encodes the pairing in the ticker as AWAY+HOME abbreviations
+ * (KXNFLGAME-26SEP13TBCIN) and titles it by city ("Tampa Bay vs Cincinnati").
+ * Abbreviations alone are unreliable - "TB" and "GB" are two letters and would
+ * match almost anything - so the ticker segment is checked as a pair, with the
+ * city names as the fallback.
+ */
+/**
+ * The calendar dates this game could plausibly be filed under.
+ *
+ * game.date is the Mountain-time date. Kalshi stamps its own date into the
+ * ticker, and a late kickoff lands on the next day in ET or UTC - a 9pm MT game
+ * is already tomorrow in UTC. Comparing only against the Mountain date means
+ * those games never match any market, and the game silently reads as "not on
+ * Kalshi" no matter how actively it is trading.
+ */
+export function gameDates(game) {
+  if (game._dates) return game._dates;
+  const out = [game.date];
+  if (game.startUTC) {
+    const d = new Date(game.startUTC);
+    if (!Number.isNaN(d.getTime())) {
+      const utc = d.toISOString().slice(0, 10);
+      const et = new Intl.DateTimeFormat('en-CA', {
+        timeZone: 'America/New_York', year: 'numeric', month: '2-digit', day: '2-digit',
+      }).format(d);
+      for (const v of [et, utc]) if (!out.includes(v)) out.push(v);
+    }
+  }
+  game._dates = out;
+  return out;
+}
+
+export function eventMatchesGame(ev, game, parsed) {
+  const dates = gameDates(game);
+  const idx = dates.indexOf(parsed.date);
+  if (idx < 0) return false;
+
+  const seg = norm(parsed.teams);
+  const away = norm(game.away.abbrev);
+  const home = norm(game.home.abbrev);
+
+  // Strongest signal: the segment is exactly the two abbreviations, in order.
+  if (seg && away && home) {
+    if (seg === away + home) return true;
+    if (seg === home + away) return true;
+  }
+
+  // Off the Mountain date, only the exact abbreviation pair counts. The looser
+  // name check below could otherwise pair a team with its own game a day later.
+  if (idx > 0) return false;
+
+  // Fallback: both cities appear in the event title.
+  const hay = norm(`${ev.title} ${ev.subtitle || ''}`);
+  const nameHit = (t) => [t.location, t.short, t.name]
+    .filter(Boolean)
+    .map(norm)
+    .some((c) => c.length >= 4 && hay.includes(c));
+  return nameHit(game.home) && nameHit(game.away);
+}
+
+/** Which market in the event is "this team wins"? */
+export function marketForTeam(ev, team) {
+  const ab = norm(team.abbrev);
+  // Kalshi suffixes the market ticker with the team abbreviation.
+  if (ab) {
+    const bySuffix = ev.markets.find((m) => norm((m.ticker || '').split('-').pop()) === ab);
+    if (bySuffix) return bySuffix;
+  }
+  const cands = [team.location, team.short, team.name].filter(Boolean).map(norm);
+  return ev.markets.find((m) => {
+    const hay = norm(m.title);
+    return cands.some((c) => c.length >= 4 && hay.includes(c));
+  }) || null;
+}

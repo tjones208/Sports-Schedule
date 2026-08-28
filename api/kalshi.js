@@ -91,6 +91,51 @@ function shapeMarket(m) {
 export default async function handler(req, res) {
   const { series, tickers, limit } = req.query;
 
+  // ?series=X&q=virginia&raw=1 dumps the untouched Kalshi payload for matching
+  // events alongside what this handler makes of it. When the app says there is
+  // no ask and the Kalshi page shows a price, this is what settles which of the
+  // two is wrong - the fields Kalshi sent, or the reading of them.
+  if (series && req.query.q) {
+    try {
+      const j = await kalshi(
+        `/events?series_ticker=${encodeURIComponent(series)}&status=open&limit=200&with_nested_markets=true`);
+      const needle = String(req.query.q).toLowerCase();
+      const hits = (j?.events || []).filter((e) =>
+        `${e.event_ticker} ${e.title} ${e.sub_title || ''}`.toLowerCase().includes(needle));
+      res.setHeader('Cache-Control', 'no-store');
+      res.status(200).json({
+        series,
+        query: req.query.q,
+        totalOpenEvents: (j?.events || []).length,
+        matched: hits.length,
+        events: hits.slice(0, 5).map((e) => ({
+          ticker: e.event_ticker,
+          title: e.title,
+          subtitle: e.sub_title || null,
+          markets: (e.markets || []).map((m) => ({
+            ticker: m.ticker,
+            title: m.yes_sub_title || m.title || null,
+            status: m.status,
+            // Exactly what Kalshi sent, before any interpretation.
+            raw: {
+              yes_bid_dollars: m.yes_bid_dollars, yes_ask_dollars: m.yes_ask_dollars,
+              no_bid_dollars: m.no_bid_dollars, no_ask_dollars: m.no_ask_dollars,
+              last_price_dollars: m.last_price_dollars,
+              yes_bid: m.yes_bid, yes_ask: m.yes_ask, last_price: m.last_price,
+              volume: m.volume, open_interest: m.open_interest,
+            },
+            // And what this handler turns it into.
+            shaped: shapeMarket(m),
+          })),
+        })),
+      });
+    } catch (err) {
+      res.setHeader('Cache-Control', 'no-store');
+      res.status(502).json({ error: err.message });
+    }
+    return;
+  }
+
   try {
     if (tickers) {
       const list = String(tickers).split(',').map((t) => t.trim()).filter(Boolean).slice(0, 60);

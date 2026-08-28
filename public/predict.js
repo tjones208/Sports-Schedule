@@ -120,68 +120,6 @@ async function getJSON(url) {
   return r.json();
 }
 
-/* ---------- Kalshi <-> ESPN matching ---------- */
-
-/** KXNFLGAME-26OCT20BOSDET -> { date: '2026-10-20', teams: 'BOSDET' } */
-function parseEventTicker(ticker) {
-  const m = /-(\d{2})([A-Z]{3})(\d{2})([A-Z0-9]*)$/.exec(ticker || '');
-  if (!m) return null;
-  const month = MONTHS.indexOf(m[2]);
-  if (month < 0) return null;
-  return {
-    date: `20${m[1]}-${String(month + 1).padStart(2, '0')}-${m[3]}`,
-    teams: m[4] || '',
-  };
-}
-
-const norm = (s) => String(s || '').toUpperCase().replace(/[^A-Z]/g, '');
-
-/**
- * Does this Kalshi event refer to this ESPN game?
- *
- * Kalshi encodes the pairing in the ticker as AWAY+HOME abbreviations
- * (KXNFLGAME-26SEP13TBCIN) and titles it by city ("Tampa Bay vs Cincinnati").
- * Abbreviations alone are unreliable - "TB" and "GB" are two letters and would
- * match almost anything - so the ticker segment is checked as a pair, with the
- * city names as the fallback.
- */
-function eventMatchesGame(ev, game, parsed) {
-  if (parsed.date !== game.date) return false;
-
-  const seg = norm(parsed.teams);
-  const away = norm(game.away.abbrev);
-  const home = norm(game.home.abbrev);
-
-  // Strongest signal: the segment is exactly the two abbreviations, in order.
-  if (seg && away && home) {
-    if (seg === away + home) return true;
-    if (seg === home + away) return true;
-  }
-
-  // Fallback: both cities appear in the event title.
-  const hay = norm(`${ev.title} ${ev.subtitle || ''}`);
-  const nameHit = (t) => [t.location, t.short, t.name]
-    .filter(Boolean)
-    .map(norm)
-    .some((c) => c.length >= 4 && hay.includes(c));
-  return nameHit(game.home) && nameHit(game.away);
-}
-
-/** Which market in the event is "this team wins"? */
-function marketForTeam(ev, team) {
-  const ab = norm(team.abbrev);
-  // Kalshi suffixes the market ticker with the team abbreviation.
-  if (ab) {
-    const bySuffix = ev.markets.find((m) => norm((m.ticker || '').split('-').pop()) === ab);
-    if (bySuffix) return bySuffix;
-  }
-  const cands = [team.location, team.short, team.name].filter(Boolean).map(norm);
-  return ev.markets.find((m) => {
-    const hay = norm(m.title);
-    return cands.some((c) => c.length >= 4 && hay.includes(c));
-  }) || null;
-}
-
 /**
  * Days since each team last played, from the league schedule already loaded.
  * Short rest is a real effect the market prices in, and a large rest gap is
@@ -554,8 +492,12 @@ async function loadFpiUniverse({ bust = false } = {}) {
     // Every game gets a row, whether or not Kalshi has opened a market on it.
     // A game with no market is a fact worth seeing, not a reason to hide it.
     const pairs = games.map((game) => {
-      const hit = (byDate.get(game.date) || [])
-        .find(({ ev, parsed }) => eventMatchesGame(ev, game, parsed));
+      let hit = null;
+      for (const d of gameDates(game)) {
+        hit = (byDate.get(d) || [])
+          .find(({ ev, parsed }) => eventMatchesGame(ev, game, parsed));
+        if (hit) break;
+      }
       return { game, ev: hit ? hit.ev : null };
     });
     const withMarket = pairs.filter((p) => p.ev).length;
@@ -689,8 +631,12 @@ async function refreshKalshiPrices() {
   for (const r of fpiRows) {
     const byDate = index.get(r.league);
     if (!byDate) continue;                       // that league's pull failed; leave it alone
-    const hit = (byDate.get(r.game.date) || [])
-      .find(({ ev, parsed }) => eventMatchesGame(ev, r.game, parsed));
+    let hit = null;
+    for (const d of gameDates(r.game)) {
+      hit = (byDate.get(d) || [])
+        .find(({ ev, parsed }) => eventMatchesGame(ev, r.game, parsed));
+      if (hit) break;
+    }
     const mkt = hit ? marketForTeam(hit.ev, r.team) : null;
     const prev = before.get(`${r.game.id}:${r.side}`) || {};
 
@@ -953,9 +899,16 @@ function renderFpi() {
         <td class="r mono" data-label="ESPN ${esc(metric)}">${r.fpi == null
           ? '<span class="pending">--</span>'
           : `<strong>${pct(r.fpi, 1)}</strong>`}</td>
-        <td class="r mono" data-label="Kalshi ask">${r.quoted ? cents(r.ask)
-          : `<span class="pending">${r.mkt ? 'no book' : 'no market'}</span>`}
-          ${r.quoted && r.bid != null ? `<div class="g-meta">bid ${cents(r.bid)}</div>` : ''}</td>
+        <td class="r mono" data-label="Kalshi ask">${r.quoted
+          ? `${cents(r.ask)}${r.bid != null ? `<div class="g-meta">bid ${cents(r.bid)}</div>` : ''}`
+          : !r.mkt ? '<span class="pending">no market</span>'
+            : (r.bid != null || r.last != null)
+              // The market is trading, there is just nothing offered to lift.
+              // Showing the numbers Kalshi does have beats claiming it is empty.
+              ? `<span class="pending">no ask</span><div class="g-meta">${
+                [r.bid != null ? `bid ${cents(r.bid)}` : null,
+                  r.last != null ? `last ${cents(r.last)}` : null].filter(Boolean).join(' &middot; ')}</div>`
+              : '<span class="pending">no book</span>'}</td>
         <td class="r mono" data-label="Target">${r.target == null ? '<span class="pending">--</span>'
           : `<strong>${r.target.toFixed(1)}&cent;</strong>
           <div class="g-meta">need ${r.required.toFixed(1)} pts${
@@ -968,7 +921,10 @@ function renderFpi() {
           r.status === 'trade' ? '<span class="trigchip">TRADE</span>'
             : r.status === 'pass' ? `<span class="passchip">pass</span><div class="g-meta">${
               Math.abs(r.surplus).toFixed(1)} pts too rich</div>`
-              : r.status === 'noquote' ? '<span class="pending">no book yet</span>'
+              : r.status === 'noquote'
+                ? (r.bid != null || r.last != null
+                  ? `<span class="pending">nothing offered</span><div class="g-meta">rest a bid to get filled</div>`
+                  : '<span class="pending">no book yet</span>')
                 : r.status === 'nomarket' ? '<span class="pending">not on Kalshi</span>'
                   : `<span class="pending">no ${esc(MODEL.name(r.league))}</span>`}</td>
         <td class="r mono" data-label="Expected P&amp;L" data-tone="${
@@ -1016,6 +972,9 @@ function renderFpi() {
   game missing from a list is indistinguishable from a game that does not exist. <strong>not on
   Kalshi</strong> means no market has been created; <strong>no book yet</strong> means the market
   exists but nobody is quoting it, which is normal until the days before kickoff;
+  <strong>nothing offered</strong> means it is trading but no one is currently selling &mdash;
+  Kalshi's own page will still show a last price, and you would have to rest a bid rather than
+  lift an offer, which also drops the fee to a quarter;
   <strong>no ${esc(metric)}</strong> means ESPN has published no projection, so there is nothing to
   price against. Use <em>Priced only</em> to reduce the table to what you can actually act on.</p>
 
@@ -1207,6 +1166,9 @@ const BT_DEFAULTS = {
 
 let Sim = null;              // public/simulate.mjs, imported on first use
 let BT_PLAN = null;          // SEASON_PLAN from that module
+// Kalshi <-> ESPN matching lives in that module so it can be tested directly;
+// these are bound once it loads, which the boot awaits before fetching.
+let parseEventTicker, eventMatchesGame, marketForTeam, gameDates;
 let btData = null;           // { league, year, dataset, withMarket, ... }
 let btOpts = { ...BT_DEFAULTS };
 let btRunToken = 0;          // cancels a load when the user starts another
@@ -1215,6 +1177,7 @@ async function loadSim() {
   if (!Sim) {
     Sim = await import('./simulate.mjs');
     BT_PLAN = Sim.SEASON_PLAN;
+    ({ parseEventTicker, eventMatchesGame, marketForTeam, gameDates } = Sim);
   }
   return Sim;
 }
@@ -2141,5 +2104,9 @@ wireBacktest();
 renderBank();
 renderPositions();
 showTab('edges');
-loadLeague(document.getElementById('edgeLeague').value);
-refreshMarks();
+
+(async function boot() {
+  await loadSim();          // the matchers must exist before anything fetches
+  loadLeague(document.getElementById('edgeLeague').value);
+  refreshMarks();
+})();

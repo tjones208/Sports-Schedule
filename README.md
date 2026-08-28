@@ -302,7 +302,27 @@ what keeps repeat views off Kalshi's API; the refresh buttons bypass it delibera
 Game markets are matched to ESPN games through the event ticker, which encodes the pairing as
 away+home abbreviations with a date (`KXNFLGAME-26SEP13TBCIN`). Abbreviations alone are
 unreliable - "TB" would match almost anything - so the ticker segment is checked as an ordered
-pair, with the city names in the event title as the fallback. The discount defaults to 5 points and is editable; so are the
+pair, with the city names in the event title as the fallback.
+
+**The date is not a single value.** `game.date` is the Mountain-time date, while Kalshi stamps
+its own into the ticker, and an evening kickoff is already the next day in UTC - 8pm Mountain
+is 02:00 UTC. A game is therefore matched against its Mountain, Eastern and UTC dates. Off the
+Mountain date only the exact abbreviation pair is accepted, so the looser title check cannot
+pair a team with its own game a day later.
+
+This matters more than it sounds: comparing against the Mountain date alone meant every night
+game read as *not on Kalshi*, which is indistinguishable from a game that genuinely has no
+market. The matching lives in `public/simulate.mjs` and is covered by
+`test/matching.test.mjs` for exactly that reason.
+
+When there is no ask but the market is trading, the tab shows the bid and last price and says
+**nothing offered** rather than claiming there is no book - Kalshi's own page will show a last
+price in that situation. You cannot lift an offer that does not exist, but you can rest a bid,
+which also drops the fee to a quarter.
+
+`/api/kalshi?series=X&q=<text>&raw=1` dumps the untouched Kalshi payload for matching events
+alongside what the handler makes of it, for settling whether a missing price is Kalshi's or
+the app's reading of it. The discount defaults to 5 points and is editable; so are the
 FPI range (lower and upper bound), the contract size, the sport, the date window, and
 whether to show both sides of a game or only the side FPI favours.
 
