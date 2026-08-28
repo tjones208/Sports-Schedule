@@ -94,9 +94,13 @@ export default async function handler(req, res) {
   }
 
   const tzMode = tz === 'mst' ? 'mst' : 'denver';
-  // College football only: drop games against FCS opponents unless asked not to.
-  const fbsOnly = league.id === 'ncaaf' && req.query.fbs !== '0';
-  const fbsIds = fbsOnly ? await getFbsTeamIds(league.season) : null;
+  // College football: every game is annotated with whether both teams are FBS,
+  // and ?fbs=0 keeps the FBS-vs-FCS ones instead of dropping them. Week 1 is
+  // largely FBS-vs-FCS, and a caller that wants to show the full slate and let
+  // the reader filter needs those games to arrive rather than vanish upstream.
+  const annotateFbs = league.id === 'ncaaf';
+  const fbsOnly = annotateFbs && req.query.fbs !== '0';
+  const fbsIds = annotateFbs ? await getFbsTeamIds(league.season) : null;
   const extra = new URLSearchParams({ limit: SCOREBOARD_LIMIT, ...league.query }).toString();
   const started = Date.now();
   const games = new Map();
@@ -106,7 +110,13 @@ export default async function handler(req, res) {
   const collect = (json) => {
     for (const event of json?.events ?? []) {
       const g = normalizeEvent(event, league, tzMode);
-      if (g) games.set(g.id, slim(g));
+      if (!g) continue;
+      const competition = event?.competitions?.[0];
+      const bothFbs = fbsIds ? isFbsMatchup(competition, fbsIds) : null;
+      if (fbsOnly && !bothFbs) continue;
+      const row = slim(g);
+      if (bothFbs !== null) row.fbs = bothFbs;
+      games.set(g.id, row);
     }
   };
 

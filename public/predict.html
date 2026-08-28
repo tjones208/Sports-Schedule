@@ -94,6 +94,7 @@
   <!-- FPI STRATEGY -->
   <section id="panel-fpi" class="panel" hidden>
     <div class="filters">
+      <input type="search" id="fpiSearch" placeholder="Find a team&hellip;" aria-label="Search by team, sport or network" style="min-width:180px">
       <select id="fpiLeague" aria-label="Sport">
         <option value="all">All sports</option>
         <option value="nfl">NFL</option>
@@ -109,7 +110,7 @@
       </label>
       <label class="toggle"><input type="checkbox" id="fpiAddFee"> Add fee on top</label>
       <label class="toggle" for="fpiLow">FPI
-        <input type="number" id="fpiLow" min="0" max="100" step="1" value="50" style="width:58px" aria-label="Lower FPI bound, percent">
+        <input type="number" id="fpiLow" min="0" max="100" step="1" value="0" style="width:58px" aria-label="Lower model probability bound, percent">
         <span>&ndash;</span>
         <input type="number" id="fpiHigh" min="0" max="100" step="1" value="100" style="width:58px" aria-label="Upper FPI bound, percent">
         <span>%</span>
@@ -119,7 +120,8 @@
         <span>ct</span>
       </label>
       <label class="toggle"><input type="checkbox" id="fpiTrigOnly"> Triggers only</label>
-      <label class="toggle"><input type="checkbox" id="fpiQuotedOnly" checked> Quoted only</label>
+      <label class="toggle"><input type="checkbox" id="fpiQuotedOnly"> Priced only</label>
+      <label class="toggle"><input type="checkbox" id="fpiFbs"> FBS only</label>
       <label class="toggle"><input type="checkbox" id="fpiBoth"> Both sides</label>
       <label class="toggle" for="fpiFrom">From <input type="date" id="fpiFrom" aria-label="Only games on or after this date"></label>
       <label class="toggle" for="fpiTo">To <input type="date" id="fpiTo" aria-label="Only games on or before this date"></label>
@@ -134,7 +136,8 @@
       </label>
       <button class="btn" id="fpiReset" type="button">Reset filters</button>
       <span class="spacer"></span>
-      <button class="btn" id="fpiReload" type="button">Reload all sports</button>
+      <button class="btn primary" id="fpiReload" type="button"
+        title="Re-pull schedules, Kalshi books and ESPN projections, bypassing the cache">Refresh</button>
     </div>
     <div id="fpiOut"></div>
   </section>

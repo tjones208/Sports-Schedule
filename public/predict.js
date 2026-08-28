@@ -25,12 +25,14 @@ const DEFAULTS = {
   // buying at that price has been worth it historically.
   fpiDiscountPts: 5,
   fpiAddFee: false,      // treat the discount as a margin on top of the fee
-  fpiLowPct: 50,
+  fpiLowPct: 0,
   fpiHighPct: 100,
   fpiContracts: 100,     // the backtest sized every game at 100 contracts
   fpiBothSides: false,
   fpiTriggersOnly: false,
-  fpiQuotedOnly: true,
+  fpiQuotedOnly: false,   // show the full slate; the reader narrows it
+  fpiFbsOnly: false,      // college football: hide FBS-vs-FCS matchups
+  fpiSearch: '',
   fpiLeague: 'all',
   fpiSort: 'surplus',
 
@@ -496,12 +498,21 @@ let fpiLoading = false;
 let fpiLoaded = false;
 let fpiFrom = '';
 let fpiTo = '';
+let fpiRefreshedAt = null;
 
 /* ---------- loading ---------- */
 
-async function loadFpiUniverse() {
+/**
+ * @param bust when true, append a unique query value so Vercel's edge cache is
+ *   bypassed. /api/schedule and /api/predictor are cached for six hours, so a
+ *   plain reload would replay them and the button would look inert on the day
+ *   a line moves or a book opens.
+ */
+async function loadFpiUniverse({ bust = false } = {}) {
   if (fpiLoading) return;
   fpiLoading = true;
+  const priorTriggers = new Set(fpiRows.map(decorateFpi)
+    .filter((r) => r.trigger).map((r) => r.mkt && r.mkt.ticker).filter(Boolean));
   fpiRows = [];
   fpiDiag = [];
 
@@ -515,9 +526,13 @@ async function loadFpiUniverse() {
     NBA, NHL and college basketball. This is five sports at once, so give it a few seconds.</p></div>`;
 
   const perLeague = await Promise.all(ALL_LEAGUES.map(async (league) => {
+    // fbs=0 keeps FBS-vs-FCS games. This tab shows the whole slate and lets the
+    // reader filter, so a game must not be dropped before it arrives.
+    const fbs = league === 'ncaaf' ? '&fbs=0' : '';
+    const cb = bust ? `&_=${Date.now()}` : '';
     const [sRes, kRes] = await Promise.allSettled([
-      getJSON(`/api/schedule?league=${league}&start=${from}&end=${to}`),
-      getJSON(`/api/kalshi?series=${GAME_SERIES[league]}`),
+      getJSON(`/api/schedule?league=${league}&start=${from}&end=${to}${fbs}${cb}`),
+      getJSON(`/api/kalshi?series=${GAME_SERIES[league]}${cb}`),
     ]);
 
     // Out of season, the schedule endpoint reports "no games" rather than an
@@ -526,16 +541,27 @@ async function loadFpiUniverse() {
     const games = sRes.status === 'fulfilled' ? (sRes.value.games || []) : [];
     const events = kRes.status === 'fulfilled' ? (kRes.value.events || []) : [];
 
-    const pairs = [];
+    // Index the open Kalshi events by date so pairing does not degrade into
+    // comparing every game against every event.
+    const byDate = new Map();
     for (const ev of events) {
       const parsed = parseEventTicker(ev.ticker);
       if (!parsed) continue;
-      const game = games.find((g) => eventMatchesGame(ev, g, parsed));
-      if (game) pairs.push({ game, ev });
+      if (!byDate.has(parsed.date)) byDate.set(parsed.date, []);
+      byDate.get(parsed.date).push({ ev, parsed });
     }
 
+    // Every game gets a row, whether or not Kalshi has opened a market on it.
+    // A game with no market is a fact worth seeing, not a reason to hide it.
+    const pairs = games.map((game) => {
+      const hit = (byDate.get(game.date) || [])
+        .find(({ ev, parsed }) => eventMatchesGame(ev, game, parsed));
+      return { game, ev: hit ? hit.ev : null };
+    });
+    const withMarket = pairs.filter((p) => p.ev).length;
+
     return {
-      league, games, events, pairs, noGames,
+      league, games, events, pairs, withMarket, noGames,
       scheduleError: sRes.status === 'rejected' && !noGames ? sRes.reason.message : null,
       kalshiError: kRes.status === 'rejected' ? kRes.reason.message : null,
     };
@@ -544,12 +570,16 @@ async function loadFpiUniverse() {
   // FPI, one batched call per 60 matched games. Only matched games are asked
   // for - an unmatched game has no market to compare a projection against.
   await Promise.all(perLeague.map(async (L) => {
-    const ids = [...new Set(L.pairs.map((p) => String(p.game.id).replace(/^[a-z]+-/, '')))]
+    // Games with a market matter most, so they get the budget first; the rest
+    // fill whatever is left. A game that misses out still shows, unrated.
+    const ordered = [...L.pairs].sort((a, b) => (b.ev ? 1 : 0) - (a.ev ? 1 : 0));
+    const ids = [...new Set(ordered.map((p) => String(p.game.id).replace(/^[a-z]+-/, '')))]
       .slice(0, FPI_MAX_IDS_PER_LEAGUE);
     L.fpi = new Map();
     for (let i = 0; i < ids.length; i += 60) {
       try {
-        const j = await getJSON(`/api/predictor?league=${L.league}&ids=${ids.slice(i, i + 60).join(',')}`);
+        const j = await getJSON(`/api/predictor?league=${L.league}&ids=${ids.slice(i, i + 60).join(',')}${
+          bust ? `&_=${Date.now()}` : ''}`);
         for (const [k, v] of Object.entries(j.predictions || {})) L.fpi.set(k, v);
       } catch { /* a league without projections simply contributes no rows */ }
     }
@@ -560,31 +590,29 @@ async function loadFpiUniverse() {
     let withFpi = 0;
     for (const { game, ev } of L.pairs) {
       const p = L.fpi.get(String(game.id).replace(/^[a-z]+-/, ''));
-      if (!p) continue;
-      withFpi++;
-      for (const [side, team, opp, prob] of [
-        ['home', game.home, game.away, p.homeWin],
-        ['away', game.away, game.home, p.awayWin],
+      if (p) withFpi++;
+      for (const [side, team, opp] of [
+        ['home', game.home, game.away],
+        ['away', game.away, game.home],
       ]) {
-        if (prob == null || !Number.isFinite(prob)) continue;
-        const mkt = marketForTeam(ev, team);
-        if (!mkt) continue;
+        const prob = p ? (side === 'home' ? p.homeWin : p.awayWin) : null;
+        const mkt = ev ? marketForTeam(ev, team) : null;
         rows.push({
           league: L.league, game, ev, mkt, side, team, opp,
-          fpi: prob,
-          ask: mkt.yesAsk ?? null,
-          bid: mkt.yesBid ?? null,
-          last: mkt.last ?? null,
+          fpi: Number.isFinite(prob) ? prob : null,
+          ask: mkt ? mkt.yesAsk ?? null : null,
+          bid: mkt ? mkt.yesBid ?? null : null,
+          last: mkt ? mkt.last ?? null : null,
           book: game.fair ? game.fair[side] ?? null : null,
-          volume: mkt.volume || 0,
-          openInterest: mkt.openInterest || 0,
-          predPointDiff: p.predPointDiff ?? null,
+          volume: mkt ? mkt.volume || 0 : 0,
+          openInterest: mkt ? mkt.openInterest || 0 : 0,
+          predPointDiff: p ? p.predPointDiff ?? null : null,
         });
       }
     }
     fpiDiag.push({
       league: L.league, games: L.games.length, events: L.events.length,
-      matched: L.pairs.length, withFpi,
+      matched: L.withMarket, withFpi,
       noGames: L.noGames, scheduleError: L.scheduleError, kalshiError: L.kalshiError,
     });
   }
@@ -592,7 +620,23 @@ async function loadFpiUniverse() {
   fpiRows = rows;
   fpiLoaded = true;
   fpiLoading = false;
+  fpiRefreshedAt = new Date();
   renderFpi();
+
+  if (bust) {
+    // Say what moved. A refresh that reports nothing is indistinguishable from
+    // one that silently failed, which matters most while waiting on a book.
+    const now = rows.map(decorateFpi).filter((r) => r.trigger);
+    const fresh = now.filter((r) => r.mkt && !priorTriggers.has(r.mkt.ticker));
+    const gone = priorTriggers.size
+      ? [...priorTriggers].filter((t) => !now.some((r) => r.mkt && r.mkt.ticker === t)).length : 0;
+    const bits = [];
+    if (fresh.length) bits.push(`<strong>${fresh.length} new trigger${fresh.length === 1 ? '' : 's'}</strong>`);
+    if (gone) bits.push(`${gone} no longer qualif${gone === 1 ? 'ies' : 'y'}`);
+    toast(bits.length
+      ? `Refreshed - ${bits.join(', ').replace(/<\/?strong>/g, '')}.`
+      : 'Refreshed - no change to the triggers.');
+  }
 }
 
 /* ---------- the rule ---------- */
@@ -612,13 +656,36 @@ function fpiTarget(r) {
   return { required, feePts, target: fpiCents - required };
 }
 
+/**
+ * Every row carries a status saying why it is or is not tradeable, so a game
+ * that cannot be acted on is still visible with the reason attached rather
+ * than being dropped somewhere upstream:
+ *
+ *   trade      the ask is at or past the target
+ *   pass       priced, but too rich
+ *   noquote    Kalshi lists the game but has not opened a book
+ *   nomarket   Kalshi has no market for this game at all
+ *   unrated    ESPN has no projection, so there is nothing to price against
+ */
 function decorateFpi(r) {
-  const { required, feePts, target } = fpiTarget(r);
   const qty = Math.max(1, Math.round(state.fpiContracts) || 1);
+  const blank = {
+    ...r, qty, quoted: false, required: null, feePts: null, target: null,
+    gap: null, surplus: null, trigger: false,
+    cost: null, fee: null, evDollars: null, evPerContract: null,
+  };
+
+  // Report the first blocker in the chain: no market at all is a harder stop
+  // than a missing projection, and is the more useful thing to say.
+  if (!r.mkt) return { ...blank, status: 'nomarket' };
+  if (r.fpi == null) return { ...blank, status: 'unrated', quoted: r.ask != null };
+
+  const { required, feePts, target } = fpiTarget(r);
   const out = { ...r, required, feePts, target, qty };
 
   if (r.ask == null) {
-    return { ...out, quoted: false, gap: null, surplus: null, trigger: false,
+    return { ...out, quoted: false, status: 'noquote',
+      gap: null, surplus: null, trigger: false,
       cost: null, fee: null, evDollars: null, evPerContract: null };
   }
 
@@ -630,6 +697,7 @@ function decorateFpi(r) {
   const evDollars = qty * (r.fpi - r.ask / 100) - fee;
 
   return { ...out, quoted: true, gap, surplus, trigger: surplus >= 0,
+    status: surplus >= 0 ? 'trade' : 'pass',
     cost, fee, evDollars, evPerContract: evDollars / qty * 100 };
 }
 
@@ -642,19 +710,41 @@ function visibleFpiRows() {
   if (fpiFrom) rows = rows.filter((r) => r.game.date >= fpiFrom);
   if (fpiTo) rows = rows.filter((r) => r.game.date <= fpiTo);
 
+  // College football only: FBS-vs-FCS games are loaded so they can be seen,
+  // and hidden here on request rather than upstream.
+  if (state.fpiFbsOnly) rows = rows.filter((r) => r.game.fbs !== false);
+
+  const q = (state.fpiSearch || '').trim().toLowerCase();
+  if (q) {
+    rows = rows.filter((r) => [
+      r.team.name, r.team.short, r.team.location, r.team.abbrev,
+      r.opp.name, r.opp.short, r.opp.location, r.opp.abbrev,
+      LEAGUE_LABEL[r.league], ...(r.game.networks || []),
+    ].filter(Boolean).join(' ').toLowerCase().includes(q));
+  }
+
   if (!state.fpiBothSides) {
-    // One row per game: the side FPI actually favours.
+    // One row per game: the side the model favours, or - when there is no
+    // projection - the side the book favours, so an unrated game still
+    // collapses to something sensible instead of dropping out.
+    const rank = (r) => (r.fpi != null ? r.fpi : (r.book != null ? r.book : 0));
     const best = new Map();
     for (const r of rows) {
       const cur = best.get(r.game.id);
-      if (!cur || r.fpi > cur.fpi) best.set(r.game.id, r);
+      if (!cur || rank(r) > rank(cur)) best.set(r.game.id, r);
     }
     rows = [...best.values()];
   }
 
   const lo = Math.min(state.fpiLowPct, state.fpiHighPct);
   const hi = Math.max(state.fpiLowPct, state.fpiHighPct);
-  rows = rows.filter((r) => r.fpi * 100 >= lo && r.fpi * 100 <= hi);
+  const fullRange = lo <= 0 && hi >= 100;
+  rows = rows.filter((r) => {
+    // An unrated row has no number to compare, so it survives only while the
+    // range is wide open. Narrowing the range is a request for rated games.
+    if (r.fpi == null) return fullRange;
+    return r.fpi * 100 >= lo && r.fpi * 100 <= hi;
+  });
 
   if (state.fpiQuotedOnly) rows = rows.filter((r) => r.quoted);
   if (state.fpiTriggersOnly) rows = rows.filter((r) => r.trigger);
@@ -666,7 +756,7 @@ function visibleFpiRows() {
 
   const sorters = {
     surplus: (a, b) => low(b.surplus) - low(a.surplus) || byDate(a, b),
-    fpi: (a, b) => b.fpi - a.fpi || byDate(a, b),
+    fpi: (a, b) => low(b.fpi) - low(a.fpi) || byDate(a, b),
     date: byDate,
     price: (a, b) => (a.ask ?? 999) - (b.ask ?? 999) || byDate(a, b),
     pnl: (a, b) => low(b.evDollars) - low(a.evDollars) || byDate(a, b),
@@ -727,9 +817,11 @@ function renderFpi() {
     ? `ask &le; ${esc(metric)} &minus; (fee + ${state.fpiDiscountPts} pts)`
     : `ask &le; ${esc(metric)} &minus; ${state.fpiDiscountPts} pts`;
 
+  const tradeable = rows.filter((r) => r.quoted).length;
   const summary = `<div class="summary">
     <div class="stat"><span class="n">${triggers.length}</span><span class="k">Triggers</span></div>
     <div class="stat"><span class="n">${rows.length}</span><span class="k">Games shown</span></div>
+    <div class="stat"><span class="n">${tradeable}</span><span class="k">Priced on Kalshi</span></div>
     <div class="stat"><span class="n">${avgGap == null ? '--' : avgGap.toFixed(1)}</span><span class="k">Avg pts below ${esc(metric)}</span></div>
     <div class="stat"><span class="n">${money(totalCost)}</span><span class="k">Cost to take all</span></div>
     <div class="stat"><span class="n ${totalEv > 0 ? 'up' : totalEv < 0 ? 'down' : ''}">${money(totalEv)}</span><span class="k">Expected P&amp;L if FPI is right</span></div>
@@ -742,8 +834,9 @@ function renderFpi() {
   const body = !rows.length
     ? `<div class="empty"><h3>Nothing matches those filters</h3>
       <p>${fpiRows.length
-        ? `${fpiRows.length} sides are loaded. Widen the FPI range, lower the discount, untick
-           <em>Triggers only</em>, or clear the sport filter.`
+        ? `${fpiRows.length} sides are loaded. Clear the search box, widen the ${esc(metric)} range,
+           lower the discount, untick <em>Triggers only</em> or <em>Priced only</em>, or clear the
+           sport filter.`
         : 'No Kalshi market lined up with a game that has an ESPN projection in this window. '
           + 'Kalshi opens most game books only in the days before tip-off.'}</p></div>`
     : `<div class="tablewrap"><table class="tbl">
@@ -764,26 +857,31 @@ function renderFpi() {
         </td>
         <td data-label="Pick"><strong>${esc(r.team.short || r.team.name)}</strong>
           <div class="g-meta">${r.side === 'home' ? 'home' : 'away'}${
-            r.book == null ? '' : ` &middot; book ${pct(r.book, 0)}`}</div></td>
-        <td class="r mono" data-label="ESPN ${esc(metric)}"><strong>${pct(r.fpi, 1)}</strong></td>
+            r.book == null ? '' : ` &middot; book ${pct(r.book, 0)}`}${
+            r.game.fbs === false ? ' &middot; <span class="warnchip">FCS opponent</span>' : ''}</div></td>
+        <td class="r mono" data-label="ESPN ${esc(metric)}">${r.fpi == null
+          ? '<span class="pending">--</span>'
+          : `<strong>${pct(r.fpi, 1)}</strong>`}</td>
         <td class="r mono" data-label="Kalshi ask">${r.quoted ? cents(r.ask)
-          : '<span class="pending">no book</span>'}
+          : `<span class="pending">${r.mkt ? 'no book' : 'no market'}</span>`}
           ${r.quoted && r.bid != null ? `<div class="g-meta">bid ${cents(r.bid)}</div>` : ''}</td>
-        <td class="r mono" data-label="Target"><strong>${r.target.toFixed(1)}&cent;</strong>
+        <td class="r mono" data-label="Target">${r.target == null ? '<span class="pending">--</span>'
+          : `<strong>${r.target.toFixed(1)}&cent;</strong>
           <div class="g-meta">need ${r.required.toFixed(1)} pts${
-            state.fpiAddFee ? ` (${r.feePts.toFixed(2)} fee)` : ''}</div></td>
-        <td class="r mono" data-label="Gap" data-tone="${!r.quoted ? '' : r.gap > 0 ? 'up' : 'down'}">${
-          r.quoted ? `${r.gap >= 0 ? '+' : ''}${r.gap.toFixed(1)}` : '--'}</td>
-        <td class="r mono" data-label="vs target" data-tone="${!r.quoted ? '' : r.surplus >= 0 ? 'up' : 'down'}">${
-          r.quoted ? `${r.surplus >= 0 ? '+' : ''}${r.surplus.toFixed(1)}` : '--'}</td>
-        <td data-label="Signal">${r.quoted
-          ? (r.trigger
-            ? '<span class="trigchip">TRADE</span>'
-            : `<span class="passchip">pass</span><div class="g-meta">${
-              Math.abs(r.surplus).toFixed(1)} pts too rich</div>`)
-          : '<span class="pending">no quote</span>'}</td>
+            state.fpiAddFee ? ` (${r.feePts.toFixed(2)} fee)` : ''}</div>`}</td>
+        <td class="r mono" data-label="Gap" data-tone="${r.gap == null ? '' : r.gap > 0 ? 'up' : 'down'}">${
+          r.gap == null ? '--' : `${r.gap >= 0 ? '+' : ''}${r.gap.toFixed(1)}`}</td>
+        <td class="r mono" data-label="vs target" data-tone="${r.surplus == null ? '' : r.surplus >= 0 ? 'up' : 'down'}">${
+          r.surplus == null ? '--' : `${r.surplus >= 0 ? '+' : ''}${r.surplus.toFixed(1)}`}</td>
+        <td data-label="Signal">${
+          r.status === 'trade' ? '<span class="trigchip">TRADE</span>'
+            : r.status === 'pass' ? `<span class="passchip">pass</span><div class="g-meta">${
+              Math.abs(r.surplus).toFixed(1)} pts too rich</div>`
+              : r.status === 'noquote' ? '<span class="pending">no book yet</span>'
+                : r.status === 'nomarket' ? '<span class="pending">not on Kalshi</span>'
+                  : `<span class="pending">no ${esc(MODEL.name(r.league))}</span>`}</td>
         <td class="r mono" data-label="Expected P&amp;L" data-tone="${
-          !r.quoted ? '' : r.evDollars > 0 ? 'up' : 'down'}">${r.quoted
+          r.evDollars == null ? '' : r.evDollars > 0 ? 'up' : 'down'}">${r.evDollars != null
             ? `${money(r.evDollars)}<div class="g-meta">${r.qty} @ ${cents(r.ask)} = ${money(r.cost)} &middot; ${money(r.fee)} fee</div>`
             : '--'}</td>
         <td class="r act"><button class="btn sm" data-fpilog="${i}"${r.quoted ? '' : ' disabled'}>Log</button></td>
@@ -823,6 +921,13 @@ function renderFpi() {
   One point of discount is worth exactly $1 per game per 100 contracts, which is why the
   backtest and this tab both speak in points.</p>
 
+  <p class="fineprint">The whole slate is listed, including games that cannot be traded, because a
+  game missing from a list is indistinguishable from a game that does not exist. <strong>not on
+  Kalshi</strong> means no market has been created; <strong>no book yet</strong> means the market
+  exists but nobody is quoting it, which is normal until the days before kickoff;
+  <strong>no ${esc(metric)}</strong> means ESPN has published no projection, so there is nothing to
+  price against. Use <em>Priced only</em> to reduce the table to what you can actually act on.</p>
+
   <h3 class="sec">Where the 5 points came from &mdash; and where it does not apply</h3>
   <p class="fineprint">The discount was fitted on <strong>FBS college football only</strong>,
   2,396 games across 2023-2025, comparing ESPN FPI against closing market prices. Five points is
@@ -855,7 +960,9 @@ function renderFpi() {
   of the requirement is Kalshi's fee rather than model error &mdash; it collapses toward the tails
   because the fee is 7% x price x (1 - price). <em>Apply band</em> sets the FPI range and the
   discount to that band's worst-season requirement.</p>
-  <p class="fineprint">${fpiLoadNote()}</p>`;
+  <p class="fineprint">${fpiLoadNote()}${fpiRefreshedAt
+    ? ` &middot; pulled ${esc(fpiRefreshedAt.toLocaleTimeString('en-US',
+      { timeZone: 'America/Denver', hour: 'numeric', minute: '2-digit' }))} MT` : ''}</p>`;
 
   el.querySelectorAll('[data-fpilog]').forEach((b) => {
     b.addEventListener('click', () => openFpiLog(rows[Number(b.dataset.fpilog)]));
@@ -904,12 +1011,14 @@ function syncFpiControls() {
   set('fpiQty', state.fpiContracts);
   set('fpiLeague', state.fpiLeague);
   set('fpiSort', state.fpiSort);
+  set('fpiSearch', state.fpiSearch || '');
   set('fpiFrom', fpiFrom);
   set('fpiTo', fpiTo);
   check('fpiAddFee', state.fpiAddFee);
   check('fpiTrigOnly', state.fpiTriggersOnly);
   check('fpiQuotedOnly', state.fpiQuotedOnly);
   check('fpiBoth', state.fpiBothSides);
+  check('fpiFbs', state.fpiFbsOnly);
 }
 
 function wireFpi() {
@@ -932,6 +1041,15 @@ function wireFpi() {
   flag('fpiTrigOnly', 'fpiTriggersOnly');
   flag('fpiQuotedOnly', 'fpiQuotedOnly');
   flag('fpiBoth', 'fpiBothSides');
+  flag('fpiFbs', 'fpiFbsOnly');
+
+  const search = document.getElementById('fpiSearch');
+  let searchTimer;
+  search.addEventListener('input', (e) => {
+    clearTimeout(searchTimer);
+    const v = e.target.value;
+    searchTimer = setTimeout(() => { state.fpiSearch = v; save(); renderFpi(); }, 150);
+  });
 
   document.getElementById('fpiLeague').addEventListener('change', (e) => {
     state.fpiLeague = e.target.value; save(); renderFpi();
@@ -948,11 +1066,18 @@ function wireFpi() {
     fpiTo = e.target.value; loadFpiUniverse();
   });
 
-  document.getElementById('fpiReload').addEventListener('click', () => loadFpiUniverse());
+  document.getElementById('fpiReload').addEventListener('click', async () => {
+    const btn = document.getElementById('fpiReload');
+    const label = btn.textContent;
+    btn.disabled = true;
+    btn.textContent = 'Refreshing\u2026';
+    try { await loadFpiUniverse({ bust: true }); }
+    finally { btn.disabled = false; btn.textContent = label; }
+  });
   document.getElementById('fpiReset').addEventListener('click', () => {
     for (const k of ['fpiDiscountPts', 'fpiAddFee', 'fpiLowPct', 'fpiHighPct',
       'fpiContracts', 'fpiBothSides', 'fpiTriggersOnly', 'fpiQuotedOnly',
-      'fpiLeague', 'fpiSort']) state[k] = DEFAULTS[k];
+      'fpiFbsOnly', 'fpiSearch', 'fpiLeague', 'fpiSort']) state[k] = DEFAULTS[k];
     save();
     const from = todayMT();
     const to = addDays(from, FPI_WINDOW_DAYS);

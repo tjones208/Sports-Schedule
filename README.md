@@ -233,9 +233,35 @@ every sport at once:
 
     buy when the Kalshi ask sits at least N points below ESPN's own FPI price.
 
-For each game it shows the FPI probability, the live Kalshi ask, and the **target** -
+**It lists the whole slate.** Every game in the window appears, including ones that cannot
+be traded, each carrying the reason:
+
+| Status | Meaning |
+|---|---|
+| **TRADE** | the ask is at or past the target |
+| pass | priced, but too rich |
+| no book yet | the market exists, nobody is quoting it - normal until close to kickoff |
+| not on Kalshi | no market has been created for this game |
+| no FPI / no BPI | ESPN publishes no projection, so there is nothing to price against |
+
+A game missing from a list is indistinguishable from a game that does not exist, so nothing
+is dropped silently. Narrow it with the search box, the sport filter, the model-probability
+range, *Priced only*, *Triggers only*, or *FBS only*.
+
+For each game it shows the model probability, the live Kalshi ask, and the **target** -
 the highest price worth paying - and flags the ones where the market is actually
-offering that price. The discount defaults to 5 points and is editable; so are the
+offering that price.
+
+**College football includes FBS-vs-FCS games.** `/api/schedule` annotates every game with
+whether both teams are FBS rather than dropping the mismatches, and this tab requests
+`fbs=0` so they arrive. Week 1 is largely FBS-vs-FCS, and Kalshi does open markets on those
+games, so filtering them out upstream made real games unfindable. They are marked *FCS
+opponent* and *FBS only* hides them. The Edges tab still filters to FBS by default.
+
+**Refresh** re-pulls schedules, Kalshi books and projections with a cache-busting parameter,
+since `/api/schedule` and `/api/predictor` are cached at the edge for six hours. It reports
+whether any triggers appeared or disappeared, so a refresh that changed nothing is
+distinguishable from one that silently failed. The discount defaults to 5 points and is editable; so are the
 FPI range (lower and upper bound), the contract size, the sport, the date window, and
 whether to show both sides of a game or only the side FPI favours.
 
