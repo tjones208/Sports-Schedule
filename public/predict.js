@@ -639,6 +639,97 @@ async function loadFpiUniverse({ bust = false } = {}) {
   }
 }
 
+/**
+ * Re-pull only the Kalshi order books.
+ *
+ * Prices move in seconds; schedules and projections do not. A full refresh
+ * re-pulls five schedules and hundreds of projection lookups and takes the
+ * better part of a minute, which is the wrong trade when all you want is a
+ * current ask. This is five requests.
+ *
+ * Pairing is redone rather than patched in place, so a game Kalshi has listed
+ * since the last pull picks up its new market instead of staying "not on
+ * Kalshi" until a full reload.
+ */
+async function refreshKalshiPrices() {
+  if (fpiLoading || !fpiLoaded) return;
+
+  const before = new Map();
+  for (const r of fpiRows) {
+    before.set(`${r.game.id}:${r.side}`, { ask: r.ask, hadMarket: !!r.mkt });
+  }
+  const priorTriggers = new Set(fpiRows.map(decorateFpi)
+    .filter((x) => x.trigger).map((x) => x.mkt && x.mkt.ticker).filter(Boolean));
+
+  const pulled = await Promise.all(ALL_LEAGUES.map(async (league) => {
+    try {
+      const j = await getJSON(`/api/kalshi?series=${GAME_SERIES[league]}&_=${Date.now()}`);
+      return { league, events: j.events || [], ok: true };
+    } catch (err) {
+      return { league, events: [], ok: false, error: err.message };
+    }
+  }));
+
+  const index = new Map();
+  for (const { league, events, ok } of pulled) {
+    if (!ok) continue;
+    const byDate = new Map();
+    for (const ev of events) {
+      const parsed = parseEventTicker(ev.ticker);
+      if (!parsed) continue;
+      if (!byDate.has(parsed.date)) byDate.set(parsed.date, []);
+      byDate.get(parsed.date).push({ ev, parsed });
+    }
+    index.set(league, byDate);
+  }
+
+  // Counted per game, not per side: with both-sides off the table shows one
+  // row per game, and "2 books opened" for a single game reads as a mistake.
+  const movedG = new Set(), openedG = new Set(), listedG = new Set();
+  for (const r of fpiRows) {
+    const byDate = index.get(r.league);
+    if (!byDate) continue;                       // that league's pull failed; leave it alone
+    const hit = (byDate.get(r.game.date) || [])
+      .find(({ ev, parsed }) => eventMatchesGame(ev, r.game, parsed));
+    const mkt = hit ? marketForTeam(hit.ev, r.team) : null;
+    const prev = before.get(`${r.game.id}:${r.side}`) || {};
+
+    r.ev = hit ? hit.ev : null;
+    r.mkt = mkt;
+    r.ask = mkt ? mkt.yesAsk ?? null : null;
+    r.bid = mkt ? mkt.yesBid ?? null : null;
+    r.last = mkt ? mkt.last ?? null : null;
+    r.volume = mkt ? mkt.volume || 0 : 0;
+    r.openInterest = mkt ? mkt.openInterest || 0 : 0;
+
+    if (!prev.hadMarket && mkt) listedG.add(r.game.id);
+    else if (prev.ask == null && r.ask != null) openedG.add(r.game.id);
+    else if (prev.ask != null && r.ask != null && prev.ask !== r.ask) movedG.add(r.game.id);
+  }
+
+  for (const d of fpiDiag) {
+    const byDate = index.get(d.league);
+    if (!byDate) continue;
+    d.events = [...byDate.values()].reduce((n, list) => n + list.length, 0);
+  }
+
+  fpiRefreshedAt = new Date();
+  renderFpi();
+
+  const now = fpiRows.map(decorateFpi).filter((x) => x.trigger);
+  const fresh = now.filter((x) => x.mkt && !priorTriggers.has(x.mkt.ticker)).length;
+  const failed = pulled.filter((x) => !x.ok);
+
+  const n = (set, one, many) => `${set.size} ${set.size === 1 ? one : many}`;
+  const bits = [];
+  if (fresh) bits.push(`${fresh} new trigger${fresh === 1 ? '' : 's'}`);
+  if (movedG.size) bits.push(n(movedG, 'price moved', 'prices moved'));
+  if (openedG.size) bits.push(n(openedG, 'book opened', 'books opened'));
+  if (listedG.size) bits.push(n(listedG, 'game newly listed', 'games newly listed'));
+  toast(`Prices refreshed${bits.length ? ` - ${bits.join(', ')}` : ' - nothing moved'}.${
+    failed.length ? ` ${failed.map((f) => LEAGUE_LABEL[f.league]).join(', ')} failed.` : ''}`);
+}
+
 /* ---------- the rule ---------- */
 
 /**
@@ -1066,6 +1157,15 @@ function wireFpi() {
     fpiTo = e.target.value; loadFpiUniverse();
   });
 
+  document.getElementById('fpiPrices').addEventListener('click', async () => {
+    const btn = document.getElementById('fpiPrices');
+    const label = btn.textContent;
+    btn.disabled = true;
+    btn.textContent = 'Pricing\u2026';
+    try { await refreshKalshiPrices(); }
+    catch (err) { toast(`Could not refresh prices: ${err.message}`); }
+    finally { btn.disabled = false; btn.textContent = label; }
+  });
   document.getElementById('fpiReload').addEventListener('click', async () => {
     const btn = document.getElementById('fpiReload');
     const label = btn.textContent;

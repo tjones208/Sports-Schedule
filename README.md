@@ -258,10 +258,51 @@ whether both teams are FBS rather than dropping the mismatches, and this tab req
 games, so filtering them out upstream made real games unfindable. They are marked *FCS
 opponent* and *FBS only* hides them. The Edges tab still filters to FBS by default.
 
-**Refresh** re-pulls schedules, Kalshi books and projections with a cache-busting parameter,
-since `/api/schedule` and `/api/predictor` are cached at the edge for six hours. It reports
-whether any triggers appeared or disappeared, so a refresh that changed nothing is
-distinguishable from one that silently failed. The discount defaults to 5 points and is editable; so are the
+#### Refreshing
+
+Two buttons, because the inputs move at very different speeds:
+
+**Refresh prices** re-pulls only the Kalshi order books - five requests, a second or two.
+Prices move constantly while schedules and projections do not, so this is the one to reach
+for. Pairing is redone rather than patched, so a game Kalshi has listed since the last pull
+picks up its new market instead of staying *not on Kalshi*.
+
+**Reload all** re-pulls schedules, books and projections. That is five season-window
+schedule requests plus a projection lookup per game, so it takes appreciably longer; it is
+what you want after a postponement or when new games enter the window.
+
+Both bypass the edge cache. `/api/schedule` and `/api/predictor` are cached for six hours
+and `/api/kalshi` for sixty seconds, so without a cache-busting parameter a refresh would
+replay the same response and look inert. Both report what moved - prices, books opening,
+games newly listed, triggers gained - counted per game so the summary matches the rows on
+screen. A refresh that changed nothing says so, which is what distinguishes it from one that
+silently failed.
+
+### How Kalshi data is pulled
+
+`/api/kalshi` proxies Kalshi's public API. It is **read-only**: it never authenticates and
+never places an order.
+
+    GET /api/kalshi?series=KXNFLGAME    open events with nested markets
+    GET /api/kalshi?tickers=A,B,C       prices for specific markets (max 60)
+
+The series form calls `/events?series_ticker=…&status=open&limit=200&with_nested_markets=true`
+against `api.elections.kalshi.com/trade-api/v2`, so only open markets come back, capped at
+200 events per series. Nested markets sometimes arrive without live quotes, so when any
+market reports no book the handler backfills from `/markets?series_ticker=…`.
+
+Prices arrive as dollar strings in `*_dollars` fields at deci-cent precision - `"0.5235"` is
+52.35 cents, not 52 - and sizes in `*_fp` fields. Both are normalised to cents on the way
+through. A resting quote of zero means nothing is offered on that side, which is not the same
+as a price of zero, so it is reported as `null` and renders as *no book yet*.
+
+Responses are cached at the edge for 60 seconds (series) and 30 seconds (tickers), which is
+what keeps repeat views off Kalshi's API; the refresh buttons bypass it deliberately.
+
+Game markets are matched to ESPN games through the event ticker, which encodes the pairing as
+away+home abbreviations with a date (`KXNFLGAME-26SEP13TBCIN`). Abbreviations alone are
+unreliable - "TB" would match almost anything - so the ticker segment is checked as an ordered
+pair, with the city names in the event title as the fallback. The discount defaults to 5 points and is editable; so are the
 FPI range (lower and upper bound), the contract size, the sport, the date window, and
 whether to show both sides of a game or only the side FPI favours.
 
