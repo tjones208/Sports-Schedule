@@ -49,6 +49,27 @@ probabilities) when ESPN has published a line for the game.
 | College football (FBS) | `ncaaf` | 2026 |
 | College basketball (D-I) | `ncaab` | 2026-27 |
 
+### Finished games
+
+A finished game is not a schedule, and nothing forward-looking in the app shows one.
+
+`normalizeEvent` carries ESPN's `state` (`pre` / `in` / `post`) and `completed` flag through to
+the browser, and `/api/schedule` drops anything already in `post` - which covers finished,
+postponed and cancelled alike, none of which belong on a board of upcoming games. `?past=1`
+asks for them back.
+
+The client applies the same judgement again, because the endpoint is edge-cached for six hours
+and a game that ends mid-window is still served from that cache. `isFinished()` in
+`public/simulate.mjs` treats a game as over when ESPN says so, **or** when more than six hours
+have elapsed since kickoff - long enough to clear a football game with overtime and a weather
+delay. Games with no announced time are exempt from the elapsed check, since ESPN gives those a
+placeholder start that is often already in the past.
+
+**A game underway is not finished** and stays visible; Kalshi keeps trading it.
+
+The Backtest tab is unaffected - it is entirely about games that have already been played, and
+reads ESPN directly rather than through `/api/schedule`.
+
 ### One thing worth knowing about ESPN
 
 ESPN's edge returns **403 to custom and spoofed browser User-Agents from

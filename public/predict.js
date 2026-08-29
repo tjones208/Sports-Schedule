@@ -480,7 +480,10 @@ async function loadFpiUniverse({ bust = false } = {}) {
     // Out of season, the schedule endpoint reports "no games" rather than an
     // outage. That is an empty league, not a failure, and should not read as one.
     const noGames = sRes.status === 'rejected' && /no games/i.test(sRes.reason.message || '');
-    const games = sRes.status === 'fulfilled' ? (sRes.value.games || []) : [];
+    // The endpoint drops finished games, but its responses are cached for six
+    // hours; this catches anything that ended inside that window.
+    const games = (sRes.status === 'fulfilled' ? (sRes.value.games || []) : [])
+      .filter((g) => !isFinished(g));
     const events = kRes.status === 'fulfilled' ? (kRes.value.events || []) : [];
 
     // Index the open Kalshi events by date so pairing does not degrade into
@@ -1218,7 +1221,7 @@ let Sim = null;              // public/simulate.mjs, imported on first use
 let BT_PLAN = null;          // SEASON_PLAN from that module
 // Kalshi <-> ESPN matching lives in that module so it can be tested directly;
 // these are bound once it loads, which the boot awaits before fetching.
-let parseEventTicker, eventMatchesGame, marketForTeam, gameDates;
+let parseEventTicker, eventMatchesGame, marketForTeam, gameDates, isFinished;
 let btData = null;           // { league, year, dataset, withMarket, ... }
 let btOpts = { ...BT_DEFAULTS };
 let btRunToken = 0;          // cancels a load when the user starts another
@@ -1227,7 +1230,7 @@ async function loadSim() {
   if (!Sim) {
     Sim = await import('./simulate.mjs');
     BT_PLAN = Sim.SEASON_PLAN;
-    ({ parseEventTicker, eventMatchesGame, marketForTeam, gameDates } = Sim);
+    ({ parseEventTicker, eventMatchesGame, marketForTeam, gameDates, isFinished } = Sim);
   }
   return Sim;
 }
@@ -2040,7 +2043,8 @@ async function loadLeague(league) {
     getJSON(`/api/kalshi?series=${GAME_SERIES[league]}`),
   ]);
 
-  games = gamesRes.status === 'fulfilled' ? (gamesRes.value.games || []) : [];
+  games = (gamesRes.status === 'fulfilled' ? (gamesRes.value.games || []) : [])
+    .filter((g) => !isFinished(g));
   kalshiEvents = kalshiRes.status === 'fulfilled' ? (kalshiRes.value.events || []) : [];
 
   const problems = [];

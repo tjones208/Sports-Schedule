@@ -483,3 +483,34 @@ export function marketForTeam(ev, team) {
     return cands.some((c) => c.length >= 4 && hay.includes(c));
   }) || null;
 }
+
+/* ---------- finished games ---------- */
+
+// Longest a game could still be running. Football with overtime and a weather
+// delay is the worst case; six hours clears it comfortably without hiding
+// anything that is genuinely still being played.
+export const CERTAINLY_OVER_HOURS = 6;
+
+/**
+ * Is this game over, postponed or cancelled - anything a forward-looking board
+ * should not be showing?
+ *
+ * /api/schedule already drops these, but its responses are edge-cached for six
+ * hours, so a game that finishes mid-window is still served. The elapsed-time
+ * check closes that gap without waiting for the cache.
+ */
+export function isFinished(game, now = Date.now()) {
+  if (!game) return false;
+  if (game.completed === true) return true;
+  if (game.state === 'post') return true;
+
+  // A game whose time is not yet announced carries a placeholder start that is
+  // often in the past. Elapsed time says nothing about it.
+  if (game.timeTBD) return false;
+
+  if (game.startUTC) {
+    const t = Date.parse(game.startUTC);
+    if (Number.isFinite(t) && now - t > CERTAINLY_OVER_HOURS * 3600000) return true;
+  }
+  return false;
+}

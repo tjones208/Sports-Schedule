@@ -40,6 +40,10 @@ function saveFavorites() {
 
 /* ---------- data ---------- */
 
+// Shared with the prediction desk so both pages agree on what "finished"
+// means. Assigned before anything renders; see init().
+let isFinished = () => false;
+
 async function loadJSON(url) {
   const res = await fetch(url, { cache: 'no-store' });
   if (!res.ok) throw new Error(`${url}: ${res.status}`);
@@ -482,7 +486,7 @@ async function refreshLive() {
       true,
     );
 
-    state.games = sortGames(collected);
+    state.games = sortGames(collected.filter((g) => !isFinished(g)));
     state.isDemo = false;
     renderLeagueTabs();
     renderNetworkOptions();
@@ -523,11 +527,15 @@ function sortGames(list) {
 
 (async function init() {
   wire();
+  try {
+    ({ isFinished } = await import('./simulate.mjs'));
+  } catch { /* nothing renders differently; the API already filters */ }
 
   // A bundled build carries its data inline - nothing to fetch.
   if (window.__SCHEDULE_DATA__) {
     const d = window.__SCHEDULE_DATA__;
-    state.games = sortGames((d.leagues || []).flatMap((l) => l.games || []));
+    state.games = sortGames((d.leagues || []).flatMap((l) => l.games || [])
+      .filter((g) => !isFinished(g)));
     state.isDemo = Boolean(d.demo);
     if (state.isDemo) setNotice(SAMPLE_NOTICE);
     if (d.timezone) document.getElementById('tzname').textContent = d.timezone;
@@ -538,7 +546,8 @@ function sortGames(list) {
 
   let firstPaint = false;
   const onLeague = (data) => {
-    state.games = sortGames(state.games.concat(data.games || []));
+    state.games = sortGames(state.games.concat(
+      (data.games || []).filter((g) => !isFinished(g))));
     renderLeagueTabs();
     renderNetworkOptions();
     refresh();
@@ -567,7 +576,7 @@ function sortGames(list) {
     // Live data unavailable - fall back to the labelled sample set.
     try {
       const demo = await loadDemo();
-      state.games = sortGames(demo.games);
+      state.games = sortGames(demo.games.filter((g) => !isFinished(g)));
       state.isDemo = true;
       document.getElementById('tzname').textContent = demo.timezone || 'America/Denver';
       setNotice(SAMPLE_NOTICE + `<div style="margin-top:4px">Live schedules were

@@ -67,6 +67,7 @@ function slim(g) {
     id: g.id, league: g.league, date: g.date, time: g.time, tz: g.tz,
     weekday: g.weekday, sortKey: g.sortKey, timeTBD: g.timeTBD,
     startUTC: g.startUTC, networks: g.networks, national: g.national,
+    state: g.state, statusName: g.statusName, completed: g.completed,
     week: g.week, neutralSite: g.neutralSite, notes: g.notes,
     odds: g.odds, fair: g.fair,
     venue: g.venue,
@@ -98,6 +99,9 @@ export default async function handler(req, res) {
   // and ?fbs=0 keeps the FBS-vs-FCS ones instead of dropping them. Week 1 is
   // largely FBS-vs-FCS, and a caller that wants to show the full slate and let
   // the reader filter needs those games to arrive rather than vanish upstream.
+  // A finished game is not a schedule. They are dropped unless ?past=1 asks
+  // for them, so nothing downstream has to remember to filter.
+  const includePast = req.query.past === '1';
   const annotateFbs = league.id === 'ncaaf';
   const fbsOnly = annotateFbs && req.query.fbs !== '0';
   const fbsIds = annotateFbs ? await getFbsTeamIds(league.season) : null;
@@ -111,6 +115,9 @@ export default async function handler(req, res) {
     for (const event of json?.events ?? []) {
       const g = normalizeEvent(event, league, tzMode);
       if (!g) continue;
+      // 'post' covers finished, postponed and cancelled - none of which belong
+      // on a forward-looking board.
+      if (!includePast && (g.completed || g.state === 'post')) continue;
       const competition = event?.competitions?.[0];
       const bothFbs = fbsIds ? isFbsMatchup(competition, fbsIds) : null;
       if (fbsOnly && !bothFbs) continue;
@@ -168,6 +175,7 @@ export default async function handler(req, res) {
     range: { start: from, end: to },
     generatedAt: new Date().toISOString(),
     gameCount: list.length,
+    includesFinished: includePast,
     withNetwork: list.filter((g) => g.networks.length > 0).length,
     games: list,
     ...(debug ? { debug: { requests, ms: Date.now() - started, errors: errors.slice(0, 10) } } : {}),
