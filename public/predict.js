@@ -502,8 +502,15 @@ async function loadFpiUniverse({ bust = false } = {}) {
     });
     const withMarket = pairs.filter((p) => p.ev).length;
 
+    // Kalshi events that paired with nothing. Listing these turns the one
+    // failure mode that is invisible by construction - a market the app cannot
+    // recognise looks exactly like a game Kalshi never listed - into something
+    // on screen with its ticker attached.
+    const paired = new Set(pairs.filter((p) => p.ev).map((p) => p.ev.ticker));
+    const orphans = events.filter((ev) => !paired.has(ev.ticker));
+
     return {
-      league, games, events, pairs, withMarket, noGames,
+      league, games, events, pairs, withMarket, orphans, noGames,
       scheduleError: sRes.status === 'rejected' && !noGames ? sRes.reason.message : null,
       kalshiError: kRes.status === 'rejected' ? kRes.reason.message : null,
     };
@@ -554,7 +561,7 @@ async function loadFpiUniverse({ bust = false } = {}) {
     }
     fpiDiag.push({
       league: L.league, games: L.games.length, events: L.events.length,
-      matched: L.withMarket, withFpi,
+      matched: L.withMarket, withFpi, orphans: L.orphans,
       noGames: L.noGames, scheduleError: L.scheduleError, kalshiError: L.kalshiError,
     });
   }
@@ -1010,6 +1017,29 @@ function renderFpi() {
   of the requirement is Kalshi's fee rather than model error &mdash; it collapses toward the tails
   because the fee is 7% x price x (1 - price). <em>Apply band</em> sets the FPI range and the
   discount to that band's worst-season requirement.</p>
+  ${(() => {
+    const orphans = fpiDiag.flatMap((d) => (d.orphans || []).map((ev) => ({ league: d.league, ev })));
+    if (!orphans.length) return '';
+    const shown = orphans.slice(0, 40);
+    return `<h3 class="sec">Kalshi markets with no game attached (${orphans.length})</h3>
+    <p class="fineprint">These are open Kalshi events this app could not pair with a game on the
+    schedule. A game whose market lands here reads as <em>not on Kalshi</em> in the table above
+    even though it is trading, so if you are hunting for something that should be listed, look
+    here first &mdash; the ticker says what Kalshi calls it.</p>
+    <div class="tablewrap"><table class="tbl">
+      <thead><tr><th>Sport</th><th>Kalshi event</th><th>Ticker</th><th class="r">Markets</th></tr></thead>
+      <tbody>${shown.map(({ league, ev }) => `<tr>
+        <td data-label="Sport"><span class="lgchip">${esc(LEAGUE_LABEL[league] || league)}</span></td>
+        <td data-label="Kalshi event">${esc(ev.title || '--')}</td>
+        <td class="mono" data-label="Ticker" style="font-size:11px">${esc(ev.ticker)}</td>
+        <td class="r mono" data-label="Markets">${(ev.markets || []).map((m) =>
+          `${esc(m.title || '?')} ${m.yesAsk != null ? cents(m.yesAsk)
+            : m.last != null ? `last ${cents(m.last)}` : '--'}`).join('<br>')}</td>
+      </tr>`).join('')}</tbody></table></div>
+    ${orphans.length > shown.length
+      ? `<p class="fineprint">${orphans.length - shown.length} more not listed.</p>` : ''}`;
+  })()}
+
   <p class="fineprint">${fpiLoadNote()}${fpiRefreshedAt
     ? ` &middot; pulled ${esc(fpiRefreshedAt.toLocaleTimeString('en-US',
       { timeZone: 'America/Denver', hour: 'numeric', minute: '2-digit' }))} MT` : ''}</p>`;

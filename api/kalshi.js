@@ -97,16 +97,27 @@ export default async function handler(req, res) {
   // two is wrong - the fields Kalshi sent, or the reading of them.
   if (series && req.query.q) {
     try {
-      const j = await kalshi(
-        `/events?series_ticker=${encodeURIComponent(series)}&status=open&limit=200&with_nested_markets=true`);
+      const all = [];
+      let c = '';
+      let pg = 0;
+      do {
+        const j = await kalshi(`/events?series_ticker=${encodeURIComponent(series)}`
+          + `&status=open&limit=200&with_nested_markets=true${c ? `&cursor=${encodeURIComponent(c)}` : ''}`);
+        all.push(...(j?.events || []));
+        c = j?.cursor || '';
+        pg++;
+      } while (c && pg < 12);
       const needle = String(req.query.q).toLowerCase();
-      const hits = (j?.events || []).filter((e) =>
-        `${e.event_ticker} ${e.title} ${e.sub_title || ''}`.toLowerCase().includes(needle));
+      const hits = all.filter((e) => [
+        e.event_ticker, e.title, e.sub_title || '',
+        ...(e.markets || []).map((m) => `${m.ticker} ${m.yes_sub_title || ''} ${m.title || ''}`),
+      ].join(' ').toLowerCase().includes(needle));
       res.setHeader('Cache-Control', 'no-store');
       res.status(200).json({
         series,
         query: req.query.q,
-        totalOpenEvents: (j?.events || []).length,
+        totalOpenEvents: all.length,
+        pagesFetched: pg,
         matched: hits.length,
         events: hits.slice(0, 5).map((e) => ({
           ticker: e.event_ticker,
@@ -155,24 +166,45 @@ export default async function handler(req, res) {
       return;
     }
 
-    const n = Math.min(Number(limit) || 200, 200);
-    const j = await kalshi(
-      `/events?series_ticker=${encodeURIComponent(series)}&status=open&limit=${n}&with_nested_markets=true`,
-    );
+    // Kalshi caps a page at 200 and hands back a cursor. A single page is not
+    // the series: college football lists a whole season at once and runs well
+    // past 200 open events, with no guarantee the first page is the near ones.
+    // Anything past the cap was invisible, which reads in the app as a game
+    // having no market at all.
+    const raw = [];
+    let cursor = '';
+    let pages = 0;
+    const MAX_PAGES = 12;                      // 2,400 events is far beyond any sport here
+    do {
+      const j = await kalshi(`/events?series_ticker=${encodeURIComponent(series)}`
+        + `&status=open&limit=200&with_nested_markets=true${cursor ? `&cursor=${encodeURIComponent(cursor)}` : ''}`);
+      raw.push(...(j?.events || []));
+      cursor = j?.cursor || '';
+      pages++;
+    } while (cursor && pages < MAX_PAGES);
 
-    const events = (j?.events || []).map((e) => ({
+    const events = raw.map((e) => ({
       ticker: e.event_ticker,
       title: e.title,
       subtitle: e.sub_title || null,
       markets: (e.markets || []).map(shapeMarket),
     }));
 
-    // Nested markets sometimes omit live quotes; backfill from the markets endpoint.
+    // Nested markets sometimes omit live quotes; backfill from the markets
+    // endpoint, which paginates the same way and needs the same treatment.
     const needQuotes = events.some((e) => e.markets.some((m) => !m.hasBook));
     if (needQuotes && events.length) {
       try {
-        const mj = await kalshi(`/markets?series_ticker=${encodeURIComponent(series)}&status=open&limit=200`);
-        const byTicker = new Map((mj?.markets || []).map((m) => [m.ticker, shapeMarket(m)]));
+        const byTicker = new Map();
+        let mCursor = '';
+        let mPages = 0;
+        do {
+          const mj = await kalshi(`/markets?series_ticker=${encodeURIComponent(series)}`
+            + `&status=open&limit=1000${mCursor ? `&cursor=${encodeURIComponent(mCursor)}` : ''}`);
+          for (const m of mj?.markets || []) byTicker.set(m.ticker, shapeMarket(m));
+          mCursor = mj?.cursor || '';
+          mPages++;
+        } while (mCursor && mPages < MAX_PAGES);
         for (const e of events) {
           e.markets = e.markets.map((m) => byTicker.get(m.ticker) || m);
         }
@@ -180,7 +212,7 @@ export default async function handler(req, res) {
     }
 
     res.setHeader('Cache-Control', 'public, s-maxage=60, stale-while-revalidate=300');
-    res.status(200).json({ series, eventCount: events.length, events });
+    res.status(200).json({ series, eventCount: events.length, pages, events });
   } catch (err) {
     res.setHeader('Cache-Control', 'no-store');
     res.status(502).json({ error: `Kalshi request failed: ${err.message}` });

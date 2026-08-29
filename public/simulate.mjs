@@ -408,18 +408,66 @@ export function eventMatchesGame(ev, game, parsed) {
     if (seg === home + away) return true;
   }
 
-  // Off the Mountain date, only the exact abbreviation pair counts. The looser
-  // name check below could otherwise pair a team with its own game a day later.
+  // The segment is always the two abbreviations run together, but Kalshi does
+  // not always use ESPN's. Split at every position and see whether the halves
+  // name the two teams - this survives UVA/VA, PITT/PIT and the like.
+  if (seg && away && home) {
+    for (let i = 1; i < seg.length; i++) {
+      const a = seg.slice(0, i);
+      const b = seg.slice(i);
+      if ((codeHit(game.away, a) && codeHit(game.home, b))
+        || (codeHit(game.home, a) && codeHit(game.away, b))) return true;
+    }
+  }
+
+  // Off the Mountain date, only a code match counts. The looser name check
+  // below could otherwise pair a team with its own game a day later.
   if (idx > 0) return false;
 
-  // Fallback: both cities appear in the event title.
-  const hay = norm(`${ev.title} ${ev.subtitle || ''}`);
-  const nameHit = (t) => [t.location, t.short, t.name]
-    .filter(Boolean)
-    .map(norm)
-    .some((c) => c.length >= 4 && hay.includes(c));
-  return nameHit(game.home) && nameHit(game.away);
+  // Names. The event title is not the only place they appear - each market is
+  // titled for its team ("Virginia"), and those are far more consistent than
+  // the event title, which Kalshi phrases in several different ways.
+  const hay = norm([
+    ev.title, ev.subtitle || '',
+    ...(ev.markets || []).map((m) => `${m.title || ''} ${m.ticker || ''}`),
+  ].join(' '));
+  return nameHit(game.home, hay) && nameHit(game.away, hay);
 }
+
+/** Does `code` plausibly name this team? Handles differing abbreviations. */
+function codeHit(team, code) {
+  if (!code || code.length < 2) return false;
+  const forms = [team.abbrev, team.short, team.location, team.name]
+    .filter(Boolean).map(norm);
+  for (const f of forms) {
+    if (!f) continue;
+    if (f === code) return true;
+    // An abbreviation is normally a prefix of the name it stands for, and one
+    // side's abbreviation is often a truncation of the other's.
+    if (code.length >= 2 && f.startsWith(code)) return true;
+    if (f.length >= 2 && code.startsWith(f)) return true;
+  }
+  return false;
+}
+
+/** Does any distinctive form of this team's name appear in the haystack? */
+function nameHit(team, hay) {
+  const forms = [team.location, team.short, team.name].filter(Boolean).map(norm);
+  if (forms.some((c) => c.length >= 4 && hay.includes(c))) return true;
+  // "Coastal Carolina" vs a title saying "Coastal Car." - fall back to the
+  // longest single word, which is the distinctive part of almost every name.
+  const words = [team.location, team.short, team.name].filter(Boolean)
+    .flatMap((v) => String(v).split(/\s+/))
+    .map(norm)
+    .filter((w) => w.length >= 5 && !GENERIC_WORDS.has(w));
+  return words.some((w) => hay.includes(w));
+}
+
+// Words that appear in enough team names to be worthless as identifiers.
+const GENERIC_WORDS = new Set([
+  'STATE', 'UNIVERSITY', 'COLLEGE', 'SAINT', 'NORTH', 'SOUTH', 'EAST', 'WEST',
+  'CENTRAL', 'NORTHERN', 'SOUTHERN', 'EASTERN', 'WESTERN', 'UNITED',
+]);
 
 /** Which market in the event is "this team wins"? */
 export function marketForTeam(ev, team) {

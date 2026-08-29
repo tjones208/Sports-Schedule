@@ -286,10 +286,13 @@ never places an order.
     GET /api/kalshi?series=KXNFLGAME    open events with nested markets
     GET /api/kalshi?tickers=A,B,C       prices for specific markets (max 60)
 
-The series form calls `/events?series_ticker=…&status=open&limit=200&with_nested_markets=true`
-against `api.elections.kalshi.com/trade-api/v2`, so only open markets come back, capped at
-200 events per series. Nested markets sometimes arrive without live quotes, so when any
-market reports no book the handler backfills from `/markets?series_ticker=…`.
+The series form calls `/events?series_ticker=…&status=open&with_nested_markets=true` against
+`api.elections.kalshi.com/trade-api/v2` and **follows the cursor**. Kalshi caps a page at 200,
+and a single page is not the series: college football lists a whole season at once and runs
+well past 200 open events, with no guarantee the first page holds the near ones. Anything past
+the cap was invisible, and an invisible market reads in the app as a game having no market at
+all. The `/markets` backfill, used when nested markets arrive without live quotes, paginates
+the same way.
 
 Prices arrive as dollar strings in `*_dollars` fields at deci-cent precision - `"0.5235"` is
 52.35 cents, not 52 - and sizes in `*_fp` fields. Both are normalised to cents on the way
@@ -303,6 +306,20 @@ Game markets are matched to ESPN games through the event ticker, which encodes t
 away+home abbreviations with a date (`KXNFLGAME-26SEP13TBCIN`). Abbreviations alone are
 unreliable - "TB" would match almost anything - so the ticker segment is checked as an ordered
 pair, with the city names in the event title as the fallback.
+
+**Abbreviations are not shared.** The ticker segment is the two abbreviations run together,
+but Kalshi does not always use ESPN's - `UVA` against `VA`, `PITT` against `PIT`. The segment
+is split at every position and each half tested against every form of a team's name, so a
+differing abbreviation still pairs. Failing that, team names are looked for in the event
+title *and in the market titles*, which are more consistent than the event title Kalshi
+phrases several different ways. Both sides must match: "Virginia" is a substring of "Virginia
+Tech", and requiring the opponent too is what keeps those apart. Words like *State* and
+*North* are excluded as identifiers.
+
+**Unmatched markets are listed.** Any open Kalshi event that pairs with no game appears in its
+own table with its ticker. This is the one failure mode that is invisible by construction - a
+market the app cannot recognise looks exactly like a game Kalshi never listed - so it is put
+on screen rather than dropped.
 
 **The date is not a single value.** `game.date` is the Mountain-time date, while Kalshi stamps
 its own into the ticker, and an evening kickoff is already the next day in UTC - 8pm Mountain

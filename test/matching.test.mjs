@@ -112,3 +112,66 @@ test('a market is found by name when the suffix does not match', () => {
   assert.equal(marketForTeam(e, team('Virginia Cavaliers', 'Virginia', 'ZZZ', 'Virginia')).title,
     'Virginia to win');
 });
+
+/* ---------- abbreviation variance ---------- */
+
+const evM = (ticker, title, marketTitles) => ({
+  ticker, title, subtitle: null,
+  markets: marketTitles.map((t, i) => ({ ticker: `${ticker}-${i}`, title: t })),
+});
+
+test('Kalshi need not use ESPN\'s abbreviations', () => {
+  const g = game({ startUTC: '2026-08-29T18:00:00Z' });
+  for (const t of [
+    'KXNCAAFGAME-26AUG29CCUUVA',   // exactly ESPN's
+    'KXNCAAFGAME-26AUG29CCUVA',    // VA rather than UVA
+    'KXNCAAFGAME-26AUG29COASUVA',  // COAS rather than CCU
+    'KXNCAAFGAME-26AUG29UVACCU',   // reversed
+  ]) {
+    assert.equal(eventMatchesGame(evM(t, '', []), { ...g }, parseEventTicker(t)), true, t);
+  }
+});
+
+test('the market titles carry a match when the event title does not', () => {
+  // Kalshi phrases event titles several ways, but each market is titled for
+  // its team, which is far more consistent.
+  const g = game({ startUTC: '2026-08-29T18:00:00Z' });
+  const t = 'KXNCAAFGAME-26AUG29XXYY';
+  assert.equal(eventMatchesGame(evM(t, 'Who wins?', ['Virginia', 'Coastal Carolina']),
+    { ...g }, parseEventTicker(t)), true);
+});
+
+test('a near-miss opponent does not match', () => {
+  // "Virginia" is a substring of "Virginia Tech", so the home side alone would
+  // have matched. Requiring both sides is what stops it.
+  const g = game({ startUTC: '2026-08-29T18:00:00Z' });
+  const t = 'KXNCAAFGAME-26AUG29VTNCST';
+  assert.equal(eventMatchesGame(evM(t, 'Virginia Tech vs NC State',
+    ['Virginia Tech', 'NC State']), { ...g }, parseEventTicker(t)), false);
+});
+
+test('a different game on the same date does not match', () => {
+  const g = game({ startUTC: '2026-08-29T18:00:00Z' });
+  const t = 'KXNCAAFGAME-26AUG29ALAWIS';
+  assert.equal(eventMatchesGame(evM(t, 'Wisconsin vs Alabama', ['Alabama', 'Wisconsin']),
+    { ...g }, parseEventTicker(t)), false);
+});
+
+test('only one side matching is not enough', () => {
+  const g = game({ startUTC: '2026-08-29T18:00:00Z' });
+  const t = 'KXNCAAFGAME-26AUG29UVAOTH';
+  assert.equal(eventMatchesGame(evM(t, 'Virginia vs Somebody', ['Virginia', 'Somebody Else']),
+    { ...g }, parseEventTicker(t)), false);
+});
+
+test('generic words alone never carry a match', () => {
+  // "State" and "North" appear in dozens of team names and identify nothing.
+  const g = game({
+    startUTC: '2026-08-29T18:00:00Z',
+    home: { name: 'North Carolina State Wolfpack', short: 'NC State', abbrev: 'NCST', location: 'NC State' },
+    away: { name: 'Ohio State Buckeyes', short: 'Ohio State', abbrev: 'OSU', location: 'Ohio State' },
+  });
+  const t = 'KXNCAAFGAME-26AUG29QQQZZZ';
+  assert.equal(eventMatchesGame(evM(t, 'Kansas State vs Iowa State', ['Kansas State', 'Iowa State']),
+    { ...g }, parseEventTicker(t)), false);
+});
