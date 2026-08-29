@@ -436,7 +436,11 @@ let fpiLoading = false;
 let fpiLoaded = false;
 let fpiFrom = '';
 let fpiTo = '';
-let fpiRefreshedAt = null;
+// Two clocks, because the two halves refresh independently. Prices come from
+// Kalshi and move constantly; projections come from ESPN and do not. A
+// prices-only refresh must not claim the model data is fresh too.
+let fpiModelAt = null;
+let fpiPricesAt = null;
 
 /* ---------- loading ---------- */
 
@@ -569,7 +573,8 @@ async function loadFpiUniverse({ bust = false } = {}) {
   fpiRows = rows;
   fpiLoaded = true;
   fpiLoading = false;
-  fpiRefreshedAt = new Date();
+  fpiModelAt = new Date();
+  fpiPricesAt = fpiModelAt;
   renderFpi();
 
   if (bust) {
@@ -666,7 +671,7 @@ async function refreshKalshiPrices() {
     d.events = [...byDate.values()].reduce((n, list) => n + list.length, 0);
   }
 
-  fpiRefreshedAt = new Date();
+  fpiPricesAt = new Date();      // the projections were not re-pulled
   renderFpi();
 
   const now = fpiRows.map(decorateFpi).filter((x) => x.trigger);
@@ -1040,9 +1045,24 @@ function renderFpi() {
       ? `<p class="fineprint">${orphans.length - shown.length} more not listed.</p>` : ''}`;
   })()}
 
-  <p class="fineprint">${fpiLoadNote()}${fpiRefreshedAt
-    ? ` &middot; pulled ${esc(fpiRefreshedAt.toLocaleTimeString('en-US',
-      { timeZone: 'America/Denver', hour: 'numeric', minute: '2-digit' }))} MT` : ''}</p>`;
+  ${(() => {
+    if (!fpiModelAt) return '';
+    const clock = (d) => d.toLocaleTimeString('en-US',
+      { timeZone: 'America/Denver', hour: 'numeric', minute: '2-digit' });
+    const ageH = (Date.now() - fpiModelAt.getTime()) / 3600000;
+    // ESPN reruns its model as games finish and news lands. A projection from
+    // before the last slate is the dangerous kind of stale: the market has
+    // already repriced, so the gap reads as an edge when it is just lag.
+    const stale = ageH >= 12;
+    return `<p class="fineprint"${stale ? ' data-tone="down"' : ''}>
+      Kalshi prices ${esc(clock(fpiPricesAt || fpiModelAt))} MT &middot;
+      ESPN projections ${esc(clock(fpiModelAt))} MT${ageH >= 1
+        ? ` (${ageH < 24 ? `${Math.round(ageH)}h` : `${Math.round(ageH / 24)}d`} old)` : ''}.
+      <em>Refresh prices</em> updates only the first; <em>Reload all</em> updates both.${
+        stale ? ' <strong>These projections are old enough that ESPN has likely rerun its model &mdash;'
+          + ' reload before trusting a gap.</strong>' : ''}</p>`;
+  })()}
+  <p class="fineprint">${fpiLoadNote()}</p>`;
 
   el.querySelectorAll('[data-fpilog]').forEach((b) => {
     b.addEventListener('click', () => openFpiLog(rows[Number(b.dataset.fpilog)]));

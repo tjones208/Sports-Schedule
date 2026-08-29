@@ -258,6 +258,26 @@ whether both teams are FBS rather than dropping the mismatches, and this tab req
 games, so filtering them out upstream made real games unfindable. They are marked *FCS
 opponent* and *FBS only* hides them. The Edges tab still filters to FBS by default.
 
+#### How fresh the numbers are
+
+The two halves of this tab move at completely different speeds, and the page says so:
+
+> Kalshi prices 8:46 PM MT · ESPN projections 2:15 PM MT (6h old).
+
+Kalshi prices change continuously. ESPN reruns its model far less often - roughly daily,
+picking up results as games finish and news lands - so a projection does not go stale in an
+afternoon the way a price does.
+
+`/api/predictor` is cached at the edge for six hours with a 24-hour stale-while-revalidate
+window, which suits that cadence. The practical consequence is that **Refresh prices** is the
+button for normal use and **Reload all** only earns its cost once a day or after a slate
+finishes.
+
+Projections older than twelve hours are flagged, because that is the direction the staleness
+actually hurts: if ESPN has rerun its model on an injury and the market has already repriced,
+an old projection makes the market look cheap against a number that no longer holds. The gap
+reads as an edge when it is only lag.
+
 #### Refreshing
 
 Two buttons, because the inputs move at very different speeds:
