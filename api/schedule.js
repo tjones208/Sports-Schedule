@@ -14,6 +14,9 @@ import { dateRange } from '../lib/time.mjs';
 const BASE = 'https://site.api.espn.com/apis/site/v2/sports';
 const CHUNK_DAYS = 30;      // days per ESPN range request
 const CONCURRENCY = 6;
+// Day requests are small and numerous - a full season is ~150 of them - so they
+// get a higher ceiling to stay well inside the function's 60s budget.
+const DAY_CONCURRENCY = 12;
 const FETCH_TIMEOUT = 12_000;
 
 const compact = (d) => d.replace(/-/g, '');
@@ -28,10 +31,17 @@ async function getJSON(url, attempts = 3) {
         signal: AbortSignal.timeout(FETCH_TIMEOUT),
       });
       if (res.status === 404) return null;
-      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      if (!res.ok) {
+        const err = new Error(`HTTP ${res.status}`);
+        // 4xx means the request itself is wrong - retrying cannot fix it, and
+        // three attempts with backoff costs two seconds per window for nothing.
+        // 429 is the exception: that one does clear on its own.
+        err.permanent = res.status >= 400 && res.status < 500 && res.status !== 429;
+        throw err;
+      }
       return await res.json();
     } catch (err) {
-      if (i === attempts) throw err;
+      if (i === attempts || err.permanent) throw err;
       await new Promise((r) => setTimeout(r, 300 * 2 ** i));
     }
   }
@@ -127,29 +137,45 @@ export default async function handler(req, res) {
     }
   };
 
-  // One request per 30-day window. If ESPN ignores the range form we fall back
-  // to day-by-day for that window only.
+  // One request per 30-day window, falling back to one per day.
+  //
+  // ESPN's dates=START-END range form began answering HTTP 400 in September
+  // 2026; the single-day form still works. The range is still tried first
+  // because one request a month beats thirty, but the fallback now runs on ANY
+  // failure. Previously it ran only when the range SUCCEEDED and came back
+  // empty, so a 400 landed in the catch and the window was abandoned - which
+  // emptied the board completely once every window started failing.
   const spans = windows(from, to, CHUNK_DAYS);
-  await pool(spans, CONCURRENCY, async (span) => {
-    try {
-      requests++;
-      const json = await getJSON(`${BASE}/${league.path}/scoreboard?dates=${span}&${extra}`);
-      if (json?.events?.length) { collect(json); return; }
+  const rangeIssues = [];
+  let rangeWorks = true;      // one 4xx is enough to stop paying for the rest
 
-      const [s, e] = span.split('-');
-      const days = dateRange(
-        `${s.slice(0, 4)}-${s.slice(4, 6)}-${s.slice(6)}`,
-        `${e.slice(0, 4)}-${e.slice(4, 6)}-${e.slice(6)}`,
-      );
-      await pool(days, CONCURRENCY, async (day) => {
-        try {
-          requests++;
-          collect(await getJSON(`${BASE}/${league.path}/scoreboard?dates=${day}&${extra}`));
-        } catch (err) { errors.push(`${day}: ${err.message}`); }
-      });
-    } catch (err) {
-      errors.push(`${span}: ${err.message}`);
+  const byDay = async (span) => {
+    const [s, e] = span.split('-');
+    const days = dateRange(
+      `${s.slice(0, 4)}-${s.slice(4, 6)}-${s.slice(6)}`,
+      `${e.slice(0, 4)}-${e.slice(4, 6)}-${e.slice(6)}`,
+    );
+    await pool(days, DAY_CONCURRENCY, async (day) => {
+      try {
+        requests++;
+        collect(await getJSON(`${BASE}/${league.path}/scoreboard?dates=${day}&${extra}`));
+      } catch (err) { errors.push(`${day}: ${err.message}`); }
+    });
+  };
+
+  await pool(spans, CONCURRENCY, async (span) => {
+    if (rangeWorks) {
+      try {
+        requests++;
+        const json = await getJSON(`${BASE}/${league.path}/scoreboard?dates=${span}&${extra}`);
+        if (json?.events?.length) { collect(json); return; }
+        rangeIssues.push(`${span}: no events`);
+      } catch (err) {
+        rangeIssues.push(`${span}: ${err.message}`);
+        if (err.permanent) rangeWorks = false;
+      }
     }
+    await byDay(span);
   });
 
   const list = [...games.values()].sort(
@@ -160,7 +186,8 @@ export default async function handler(req, res) {
     res.setHeader('Cache-Control', 'no-store');
     res.status(502).json({
       error: 'No games returned from the upstream schedule API',
-      league: league.id, range: { start: from, end: to }, errors: errors.slice(0, 5),
+      league: league.id, range: { start: from, end: to },
+      errors: errors.slice(0, 5), rangeIssues: rangeIssues.slice(0, 5),
     });
     return;
   }
@@ -178,6 +205,7 @@ export default async function handler(req, res) {
     includesFinished: includePast,
     withNetwork: list.filter((g) => g.networks.length > 0).length,
     games: list,
-    ...(debug ? { debug: { requests, ms: Date.now() - started, errors: errors.slice(0, 10) } } : {}),
+    ...(debug ? { debug: { requests, ms: Date.now() - started, rangeFormWorking: rangeWorks,
+      errors: errors.slice(0, 10), rangeIssues: rangeIssues.slice(0, 10) } } : {}),
   });
 }
